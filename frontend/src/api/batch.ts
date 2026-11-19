@@ -1,4 +1,5 @@
 import instance, { request } from './request'
+import { saveBlob } from '@/utils/download'
 import type {
   BatchAction,
   BatchRequest,
@@ -27,18 +28,6 @@ export function batchOperate<T = Record<string, unknown>>(
     // 批量逐条独立事务执行，条数多时耗时较长，放宽默认 15s 超时
     timeout: 60000
   })
-}
-
-// 触发浏览器下载
-function saveBlob(blob: Blob, filename: string) {
-  const url = window.URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
-  window.URL.revokeObjectURL(url)
 }
 
 // 下载导入模板：GET /api/{resource}/import/template（二进制流，直接触发下载）

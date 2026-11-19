@@ -64,6 +64,7 @@ import { ElMessage } from 'element-plus'
 import { Search, Refresh, Download } from '@element-plus/icons-vue'
 import { nearExpiryPage, exportNearExpiry } from '@/api/report'
 import { useQuerySync } from '@/composables/useQuerySync'
+import { saveBlob, dateStamp } from '@/utils/download'
 import type { NearExpiryItem } from '@/types'
 
 const list = ref<NearExpiryItem[]>([])
@@ -110,25 +111,11 @@ function handleSizeChange() {
   load()
 }
 
-function formatDate(d: Date) {
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${y}${m}${day}`
-}
-
 async function handleExport() {
   exporting.value = true
   try {
     const blob = await exportNearExpiry(query.days)
-    const url = window.URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `近效期清单_${formatDate(new Date())}.xlsx`
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    window.URL.revokeObjectURL(url)
+    saveBlob(blob, `近效期清单_${dateStamp()}.xlsx`)
     ElMessage.success('导出成功')
   } catch (e) {
     // 网络/HTTP 错误已由请求拦截器统一提示，这里只补充导出体解析失败的原因

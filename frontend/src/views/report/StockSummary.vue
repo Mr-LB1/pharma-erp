@@ -108,6 +108,7 @@ import { listWarehouses } from '@/api/warehouse'
 import { formatMoney, disabledBeforeDate, disabledAfterDate } from '@/utils/format'
 import { mergeById } from '@/utils/options'
 import { useQuerySync } from '@/composables/useQuerySync'
+import { saveBlob, dateStamp } from '@/utils/download'
 import type { StockSummaryItem, Product, Warehouse } from '@/types'
 
 const list = ref<StockSummaryItem[]>([])
@@ -193,13 +194,6 @@ function handleSizeChange() {
   load()
 }
 
-function formatDate(d: Date) {
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${y}${m}${day}`
-}
-
 async function handleExport() {
   exporting.value = true
   try {
@@ -209,14 +203,7 @@ async function handleExport() {
       startDate: query.startDate || undefined,
       endDate: query.endDate || undefined
     })
-    const url = window.URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `进销存汇总_${formatDate(new Date())}.xlsx`
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    window.URL.revokeObjectURL(url)
+    saveBlob(blob, `进销存汇总_${dateStamp()}.xlsx`)
     ElMessage.success('导出成功')
   } catch (e) {
     if (!(e as { isAxiosError?: boolean })?.isAxiosError) {

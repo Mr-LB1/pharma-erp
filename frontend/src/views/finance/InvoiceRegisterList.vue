@@ -118,7 +118,7 @@ import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { Search, Plus } from '@element-plus/icons-vue'
 import { listInvoiceRegisters, createInvoiceRegister } from '@/api/finance'
 import { statusLabel, statusTag } from '@/utils/status'
-import { formatMoney } from '@/utils/format'
+import { formatMoney, formatDateTime } from '@/utils/format'
 import type { InvoiceRegister } from '@/types'
 
 const list = ref<InvoiceRegister[]>([])
@@ -154,11 +154,6 @@ const BIZ_LABELS: Record<string, string> = {
 function bizTypeLabel(type?: string | null) {
   if (!type) return '-'
   return BIZ_LABELS[type] || type
-}
-
-function formatDateTime(v?: string) {
-  if (!v) return '-'
-  return v.replace('T', ' ').slice(0, 19)
 }
 
 async function load() {

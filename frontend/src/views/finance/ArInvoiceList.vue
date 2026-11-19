@@ -178,7 +178,7 @@ import { Search, Plus } from '@element-plus/icons-vue'
 import { listArInvoices, createArInvoice } from '@/api/finance'
 import { listCustomers } from '@/api/customer'
 import { statusLabel, statusTag } from '@/utils/status'
-import { formatMoney } from '@/utils/format'
+import { formatMoney, formatDateTime } from '@/utils/format'
 import { mergeById } from '@/utils/options'
 import type { ArInvoice, Customer } from '@/types'
 
@@ -230,11 +230,6 @@ function bizTypeLabel(type?: string | null) {
 function unsettled(row: ArInvoice) {
   if (row.outstanding != null) return Number(row.outstanding)
   return Number(row.invoiceAmount || 0) - Number(row.settledAmount || 0)
-}
-
-function formatDateTime(v?: string) {
-  if (!v) return '-'
-  return v.replace('T', ' ').slice(0, 19)
 }
 
 async function load() {

@@ -105,3 +105,9 @@ export function disabledOnOrBeforeDate(min?: string | Date | null) {
   const minDay = toDayText(min)
   return (date: Date) => toDayText(date) <= minDay
 }
+
+/** 日期时间展示：ISO 字符串 → `YYYY-MM-DD HH:mm:ss`（空值显示 '-'） */
+export function formatDateTime(value?: string | null): string {
+  if (!value) return '-'
+  return value.replace('T', ' ').slice(0, 19)
+}
