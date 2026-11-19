@@ -19,3 +19,17 @@ frontend/dist/
 *.local
 .DS_Store
 Thumbs.db
+
+# 本地敏感配置（数据库口令 / JWT 密钥），模板见 backend/config/local-dev.yml.example
+backend/config/local-dev.yml
+.env.local
+
+# 运行时数据与进程文件（Redis 落盘、pid、日志目录）
+*.aof
+*.rdb
+*.pid
+logs/
+
+# 子对话临时交接文档（只保留目录占位）
+docs/handoffs/*.md
+!docs/handoffs/.gitkeep
