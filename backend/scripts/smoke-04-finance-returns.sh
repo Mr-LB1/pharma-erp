@@ -2,7 +2,9 @@
 # 批次四后端冒烟：财务 AR/AP、收付款核销、对账、退货、调拨、报表工作台
 # 前置：后端已在 http://localhost:8080 运行，管理员 admin/admin123 可用
 set -u
-BASE=http://localhost:8080
+# 服务地址：默认 localhost:8080，可用 BASE（兼容旧名 B）覆盖
+BASE=${BASE:-${B:-http://localhost:8080}}
+B="$BASE"
 JSON="Content-Type: application/json"
 PY=python
 

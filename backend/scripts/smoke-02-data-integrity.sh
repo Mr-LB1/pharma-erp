@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # 批次二后端冒烟：软删引用拦截/软删生效、入库合规、盘点时序重算、不合格品限仓与销毁留痕
 set -u
-BASE=http://localhost:8080
+# 服务地址：默认 localhost:8080，可用 BASE（兼容旧名 B）覆盖
+BASE=${BASE:-${B:-http://localhost:8080}}
+B="$BASE"
 TOKEN=$(curl -s -X POST $BASE/api/auth/login -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"admin123"}' | sed -E 's/.*"token":"([^"]+)".*/\1/')
 AUTH="Authorization: Bearer $TOKEN"

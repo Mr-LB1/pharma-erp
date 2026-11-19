@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # 批次六后端冒烟：角色权限配置（读取 / 增删 / 非法码 / ADMIN 自锁 / 审计）
 # 前置：后端已在 http://localhost:8080 运行，管理员 admin/admin123 可用
-# 用法：BASE=http://localhost:8080 bash smoke-b6.sh
+# 用法：bash scripts/smoke-06-role-permissions.sh（BASE 可覆盖服务地址）
 set -u
-B=${BASE:-http://localhost:8080}
+BASE=${BASE:-${B:-http://localhost:8080}}
+B="$BASE"
 JSON="Content-Type: application/json"
 PY=python
 jg() { $PY -c "import sys,json;d=json.load(sys.stdin);print(d$1)"; }

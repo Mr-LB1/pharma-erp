@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # 批次十四 curl 冒烟：单据导出 / 入库出库详情 / 批量作废（部分成功）/ 批量提交返回结构
-# 用法：B=http://127.0.0.1:18080 ./smoke-b14.sh
+# 用法：bash scripts/smoke-14-document-ops.sh（BASE 可覆盖服务地址）
 set -u
-B=${B:-http://127.0.0.1:18080}
-PSQL="/c/Program Files/PostgreSQL/17/bin/psql.exe"
-export PGPASSWORD=${PGPASSWORD:-'Lb123456%'}
+BASE=${BASE:-${B:-http://localhost:8080}}
+B="$BASE"
+PSQL=${PSQL:-"/c/Program Files/PostgreSQL/17/bin/psql.exe"}
+export PGPASSWORD=${PGPASSWORD:?请先 export PGPASSWORD=本地数据库口令}
 export PGCLIENTENCODING=UTF8
 TS=$(date +%s)
 TMP=$(mktemp -d)

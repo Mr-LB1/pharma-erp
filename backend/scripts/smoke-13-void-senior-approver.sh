@@ -3,9 +3,11 @@
 # 1) L2（>=10 万）单据：APPROVER 待审列表看不到、审批 403；SENIOR_APPROVER 可见并可审
 # 2) 退货专员可作废他人销售/采购退货；无权限用户 403
 set -u
-B=${B:-http://127.0.0.1:18080}
-PSQL="/c/Program Files/PostgreSQL/17/bin/psql.exe"
-export PGPASSWORD=${PGPASSWORD:-'Lb123456%'}
+# 服务地址：默认 localhost:8080，可用 BASE（兼容旧名 B）覆盖
+BASE=${BASE:-${B:-http://localhost:8080}}
+B="$BASE"
+PSQL=${PSQL:-"/c/Program Files/PostgreSQL/17/bin/psql.exe"}
+export PGPASSWORD=${PGPASSWORD:?请先 export PGPASSWORD=本地数据库口令}
 export PGCLIENTENCODING=UTF8
 TS=$(date +%s)
 APPROVER="b13-appr-$TS"

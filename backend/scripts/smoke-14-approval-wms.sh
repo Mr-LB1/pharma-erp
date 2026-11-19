@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # 批次十四验收冒烟（WMS 版）：4 类单据 DRAFT → SUBMITTED → APPROVED → PUSHED → COMPLETED
 # 校验：create/submit/approve 均不动库存与财务；WMS 回传才按实量执行；重复审批/重复回传均 400
-# 用法：B=http://127.0.0.1:18080 ./smoke-b14-approval.sh
+# 用法：bash scripts/smoke-14-approval-wms.sh（BASE 可覆盖服务地址）
 set -u
-B=${B:-http://127.0.0.1:18080}
-PSQL="/c/Program Files/PostgreSQL/17/bin/psql.exe"
-export PGPASSWORD=${PGPASSWORD:-'Lb123456%'}
+BASE=${BASE:-${B:-http://localhost:8080}}
+B="$BASE"
+PSQL=${PSQL:-"/c/Program Files/PostgreSQL/17/bin/psql.exe"}
+export PGPASSWORD=${PGPASSWORD:?请先 export PGPASSWORD=本地数据库口令}
 export PGCLIENTENCODING=UTF8
 TS="$(date +%s)-$RANDOM"
 TMP=$(mktemp -d)

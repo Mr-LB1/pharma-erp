@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # 批次三后端冒烟：用户管理 / 权限下发 / 老 token 失效 / refresh·logout / 数据权限 / 成本脱敏 / 字段级校验
 set -u
-BASE=http://localhost:8080
+# 服务地址：默认 localhost:8080，可用 BASE（兼容旧名 B）覆盖
+BASE=${BASE:-${B:-http://localhost:8080}}
+B="$BASE"
 JSON="Content-Type: application/json"
 PY=python
 TS=$(date +%s)

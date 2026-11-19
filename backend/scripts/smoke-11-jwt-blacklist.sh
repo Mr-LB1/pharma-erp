@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # 批次十一 curl 冒烟：单 token 登出黑名单
 set -u
-B=${B:-http://localhost:18080}
-R="C:/Program Files/Redis/redis-cli.exe"
+# 服务地址：默认 localhost:8080，可用 BASE（兼容旧名 B）覆盖
+BASE=${BASE:-${B:-http://localhost:8080}}
+B="$BASE"
+R=${REDIS_CLI:-"/c/Program Files/Redis/redis-cli.exe"}
 
 login() {
   curl -s -X POST "$B/api/auth/login" -H 'Content-Type: application/json' \
