@@ -42,9 +42,9 @@
 ## 技术栈
 
 ```
-后端：Spring Boot 3.3 · Spring Security(JWT) · Spring Data JPA · Flyway(23 个版本化迁移) · PostgreSQL 17
+后端：Spring Boot 3.3 · Spring Security(JWT) · Spring Data JPA · Flyway(当前 V26) · PostgreSQL 17
 前端：Vue 3 · TypeScript · Vite · Element Plus(按需引入) · Pinia · Vitest
-测试：后端 154 项（合规红线/并发/财务/权限全覆盖） + 前端 22 项
+测试：后端 174 项（合规红线/并发/财务/权限全覆盖） + 前端 36 项
 ```
 
 ## 架构
@@ -63,15 +63,43 @@
    stock_transaction / lot_trace / cost_ledger
 ```
 
+## 目录结构
+
+```
+pharma-erp/
+├── backend/
+│   ├── src/main/java/com/pharma/          # 按业务域分包
+│   │   ├── system/ base/ purchase/ sales/ inventory/
+│   │   ├── quality/ trace/ approval/ finance/ reports/
+│   │   └── common/ config/                # 通用能力（批量/导出/导入/日期校验）与安全配置
+│   ├── src/main/resources/
+│   │   ├── application.yml                # 配置（口令一律走环境变量或本地文件）
+│   │   └── db/migration/                  # Flyway 版本化迁移 V1~V26
+│   ├── src/test/java/com/pharma/          # 测试按域组织；GSP 红线用 R1~R8 命名
+│   ├── config/local-dev.yml.example       # 本地口令模板（local-dev.yml 已被忽略）
+│   ├── scripts/                           # 端到端冒烟脚本，清单见 scripts/README.md
+│   └── build.sh / run.sh                  # 本地 JDK17 构建/启动
+├── frontend/
+│   └── src/
+│       ├── api/                           # 接口封装，按业务域拆分
+│       ├── views/                         # 页面，按业务域一级分目录
+│       ├── components/                    # 通用组件（批量栏/详情抽屉/导入抽屉/批次预览）
+│       ├── composables/                   # 组合式逻辑（批量操作/筛选同步/行级防重）
+│       ├── stores/ layout/ router/ directives/
+│       ├── utils/                         # 纯函数（格式化/状态/权限/下载/差异）
+│       └── types/                         # 全局类型
+└── docs/                                  # 设计方案、M1 验收清单、测试用例、交接目录
+```
+
 ## 快速开始
 
 ```bash
 # 1. 准备 PostgreSQL 17，建库
 createdb pharma_erp
 
-# 2. 配置数据源（或使用默认 localhost:5432）
-export DB_URL=jdbc:postgresql://localhost:5432/pharma_erp
-export DB_USER=postgres DB_PASSWORD=你的密码
+# 2. 配置数据源：复制本地配置模板并填入数据库口令（该文件不入库）
+cp backend/config/local-dev.yml.example backend/config/local-dev.yml
+# 也可改用环境变量：export DB_URL=... DB_USER=... DB_PASSWORD=...
 
 # 3. 启动后端（JDK 17，表结构由 Flyway 自动迁移）
 cd backend && ./run.sh          # http://localhost:8080
@@ -82,11 +110,15 @@ cd frontend && npm install && npm run dev   # http://localhost:5173
 # 默认账号 admin / admin123
 ```
 
-运行测试：
+运行测试与冒烟：
 
 ```bash
-cd backend  && mvn test          # 154 项
-cd frontend && npm run test      # 22 项
+cd backend  && ./build.sh && mvn test   # 174 项
+cd frontend && npm run test             # 36 项
+
+# 端到端冒烟（需后端已启动；查库脚本需 export PGPASSWORD）
+export PGPASSWORD=你的本地数据库口令
+bash backend/scripts/smoke-14-document-ops.sh
 ```
 
 ## 工程实践
