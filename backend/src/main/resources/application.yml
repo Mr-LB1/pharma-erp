@@ -6,10 +6,15 @@ spring:
   application:
     name: pharma-erp
 
+  # 本地敏感配置（数据库口令等）不入库：从 config/local-dev.yml 读取，模板见 config/local-dev.yml.example
+  config:
+    import: optional:file:./config/local-dev.yml
+
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/pharma_erp}
     username: ${DB_USER:postgres}
-    password: ${DB_PASSWORD:Lb123456%}   # 本地演示；生产用环境变量/密钥管理
+    # 口令不入库：本地写在 config/local-dev.yml，部署用 DB_PASSWORD 注入
+    password: ${DB_PASSWORD:}
     driver-class-name: org.postgresql.Driver
 
   # 导入文件上限由业务代码校验（≤5MB）；容器放宽到 10MB 以便返回 400 而不是容器异常
