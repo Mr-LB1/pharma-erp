@@ -56,9 +56,11 @@ app:
     secret: ${JWT_SECRET:pharma-erp-dev-only-jwt-secret-change-in-prod-0123456789}
     expiration: ${JWT_EXPIRATION:7200000}   # 2 小时（毫秒），配合 refresh 续期
 
-  # 跨域允许来源（逗号分隔）。dev 默认本地前端；生产用 CORS_ALLOWED_ORIGINS 注入真实域名
+  # 跨域允许来源（逗号分隔，支持通配符模式）。dev 默认本地前端；
+  # 内网穿透演示域名（cpolar 隧道，浏览器 POST 请求携带 Origin 头会被 CORS 过滤器校验）；
+  # 生产用 CORS_ALLOWED_ORIGINS 注入真实域名
   cors:
-    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173}
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,https://*.cpolar.top,http://*.cpolar.top}
 
   # 单据业务日期校验（P2-6）：允许回填的最大天数，超过则 400
   biz-date:
