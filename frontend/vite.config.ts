@@ -26,6 +26,8 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    // 允许内网穿透域名访问（cpolar 隧道 Host 校验白名单）
+    allowedHosts: ['.cpolar.top'],
     proxy: {
       '/api': {
         target: 'http://localhost:8080',
