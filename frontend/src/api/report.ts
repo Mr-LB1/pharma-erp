@@ -115,9 +115,9 @@ export function listInventoryBalance(
   })
 }
 
-// 工作台聚合数据（批次四）；接口未就绪时静默失败，由页面降级拼装
+// 工作台聚合数据（批次四）：单次聚合请求，失败由 axios 拦截器统一提示
 export function getDashboard(): Promise<DashboardData> {
-  return request<DashboardData>({ url: '/api/reports/dashboard', method: 'get', silent: true })
+  return request<DashboardData>({ url: '/api/reports/dashboard', method: 'get' })
 }
 
 // 毛利报表（区间按商品汇总），工作台商品排行降级使用

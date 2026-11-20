@@ -1,6 +1,12 @@
 package com.pharma.reports.service;
 
+import com.pharma.approval.dto.ApprovalPendingVO;
+import com.pharma.approval.service.ApprovalService;
+import com.pharma.common.DataScope;
 import com.pharma.common.PageResult;
+import com.pharma.reports.dto.DashboardNearExpiryVO;
+import com.pharma.reports.dto.DashboardTodoVO;
+import com.pharma.reports.dto.DashboardTopProductVO;
 import com.pharma.reports.dto.DashboardVO;
 import com.pharma.reports.dto.GrossProfitVO;
 import com.pharma.reports.dto.InventoryBalanceVO;
@@ -16,23 +22,49 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 
 /**
- * 基础报表服务：进销存汇总 / 近效期清单 / 库存余额。
+ * 基础报表服务：进销存汇总 / 近效期清单 / 库存余额 / 毛利 / 工作台聚合。
  * 基于 stock_transaction / stock 直接 SQL 聚合，与 append-only 流水一致。
  * 过滤条件在 Java 侧动态拼接，避免 NULL 命名参数的类型推断问题。
+ * 工作台待办复用审批服务（ApprovalService 不反依赖报表模块，不存在循环依赖）。
  */
 @Service
 public class ReportService {
 
     private static final int DEFAULT_NEAR_EXPIRY_DAYS = 30;
 
+    /** 工作台待办条数上限（与前端「待办事项」面板展示容量一致）。 */
+    private static final int DASHBOARD_TODO_LIMIT = 5;
+
+    /** 工作台近效期预警条数上限。 */
+    private static final int DASHBOARD_NEAR_EXPIRY_LIMIT = 8;
+
+    /** 工作台本月销售排行条数上限。 */
+    private static final int DASHBOARD_TOP_PRODUCT_LIMIT = 5;
+
+    /** 待办展示用的单据类型中文名（与审批列表、前端 PendingList 口径一致）。 */
+    private static final Map<String, String> BIZ_TYPE_LABELS = Map.of(
+            ApprovalService.BIZ_PURCHASE_ORDER, "采购订单",
+            ApprovalService.BIZ_SALES_ORDER, "销售订单",
+            ApprovalService.BIZ_SALES_RETURN, "销售退货",
+            ApprovalService.BIZ_PURCHASE_RECEIVE, "采购入库",
+            ApprovalService.BIZ_SALES_DELIVERY, "销售出库",
+            ApprovalService.BIZ_PURCHASE_RETURN, "采购退货",
+            ApprovalService.BIZ_STOCK_TRANSFER, "仓库调拨");
+
+    /** 报表 JDBC 模板：所有报表以只读 SQL 聚合。 */
     private final NamedParameterJdbcTemplate jdbc;
 
-    public ReportService(NamedParameterJdbcTemplate jdbc) {
+    /** 审批服务：工作台待办复用待审列表（含审批角色过滤与往来单位解析）。 */
+    private final ApprovalService approvalService;
+
+    public ReportService(NamedParameterJdbcTemplate jdbc, ApprovalService approvalService) {
         this.jdbc = jdbc;
+        this.approvalService = approvalService;
     }
 
     /**
@@ -344,25 +376,36 @@ public class ReportService {
         return new PageResult<>(records, total == null ? 0 : total, p, s);
     }
 
-    /** 工作台 Dashboard（P1-29）：卡片数字 + 跳转路径。 */
+    /**
+     * 工作台 Dashboard（P1-29）：卡片数字 + 跳转路径 + 近 7 天趋势，
+     * 并一次聚合待办 / 近效期 / 本月销售排行，避免前端逐个调用降级接口。
+     * 待办仅对具备 approval:view 的用户下发，其余用户返回空列表（不越过审批数据权限）。
+     */
     public DashboardVO dashboard() {
+        // 1. 统一日期参数：近效期 30 天、证照到期 60 天、今日金额
         LocalDate today = LocalDate.now();
         MapSqlParameterSource params = new MapSqlParameterSource()
                 .addValue("expireBefore", today.plusDays(DEFAULT_NEAR_EXPIRY_DAYS))
                 .addValue("licenseBefore", today.plusDays(60))
                 .addValue("today", today);
 
+        // 2. 待审批 / 近效期计数
         Long pending = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM approval_record WHERE status = 'PENDING'", params, Long.class);
         Long nearExpiry = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM stock WHERE quantity > 0 AND expire_date <= :expireBefore",
                 params, Long.class);
+        // 3. 证照 60 天内到期计数：客户 + 供应商 + 门店（任一非空即计入）
         Long licenseExpiring = jdbc.queryForObject("""
                 SELECT (SELECT COUNT(*) FROM customer WHERE status = 'ACTIVE'
                           AND license_expire IS NOT NULL AND license_expire <= :licenseBefore)
                      + (SELECT COUNT(*) FROM supplier WHERE status = 'ACTIVE'
                           AND license_expire IS NOT NULL AND license_expire <= :licenseBefore)
+                     + (SELECT COUNT(*) FROM store WHERE status = 'ACTIVE'
+                          AND license_expire IS NOT NULL AND license_expire <= :licenseBefore)
                 """, params, Long.class);
+
+        // 4. 今日金额：执行态口径为 COMPLETED（历史数据兼容 ACTIVE）
         BigDecimal todayPurchase = jdbc.queryForObject("""
                 SELECT COALESCE(SUM(ri.quantity * ri.unit_cost), 0)
                 FROM purchase_receive_item ri
@@ -377,13 +420,128 @@ public class ReportService {
                 WHERE d.delivery_date = :today
                 """, params, BigDecimal.class);
 
+        // 5. 明细聚合：待办 / 近效期 / 本月销售排行
+        List<DashboardTodoVO> dashboardTodoList = dashboardTodos();
+        List<DashboardNearExpiryVO> dashboardNearExpiryList = dashboardNearExpiry();
+        List<DashboardTopProductVO> dashboardTopProductList = dashboardTopProducts(today);
+
+        // 6. 组装返回：原有字段顺序与语义不变，新增明细追加在末尾
         return new DashboardVO(
                 pending == null ? 0 : pending, "/approval/pending",
                 nearExpiry == null ? 0 : nearExpiry, "/reports/near-expiry",
                 licenseExpiring == null ? 0 : licenseExpiring, "/base/customers?licenseExpiring=1",
                 todayPurchase == null ? BigDecimal.ZERO : todayPurchase, "/purchase/receives",
                 todaySales == null ? BigDecimal.ZERO : todaySales, "/sales/deliveries",
-                trends(today));
+                trends(today), dashboardTodoList, dashboardNearExpiryList, dashboardTopProductList);
+    }
+
+    /**
+     * 工作台待办：仅对具备 approval:view 的用户查询前 5 条待审批单据。
+     * 权限不足时直接返回空列表，避免把审批数据泄露给普通报表用户。
+     *
+     * @return 待办列表（按待审列表默认排序），无权限或无待办时为空列表
+     */
+    private List<DashboardTodoVO> dashboardTodos() {
+        // 1. 权限校验：待办属于审批数据，没有 approval:view 不下发
+        if (!DataScope.hasAuthority(DataScope.APPROVAL_VIEW)) {
+            return List.of();
+        }
+        // 2. 复用待审列表第 1 页前 5 条，映射为工作台待办字段
+        PageResult<ApprovalPendingVO> pendingPage = approvalService.pending(1, DASHBOARD_TODO_LIMIT);
+        List<ApprovalPendingVO> pendingList = pendingPage.getRecords() == null
+                ? List.of() : pendingPage.getRecords();
+        return pendingList.stream()
+                .map(pending -> new DashboardTodoVO(pending.bizType(), pending.bizId(),
+                        todoTitle(pending), pending.orderDate()))
+                .toList();
+    }
+
+    /**
+     * 拼接待办标题：单据类型中文 + 单号 + 往来单位，缺失片段自动省略。
+     *
+     * @param pending 待审批单据统一视图
+     * @return 形如「采购订单 PO-001 · 某供应商」的待办标题
+     */
+    private String todoTitle(ApprovalPendingVO pending) {
+        // 1. 单据类型中文名打底，未知类型回退原始编码
+        String bizTypeLabel = BIZ_TYPE_LABELS.getOrDefault(pending.bizType(), pending.bizType());
+        StringBuilder title = new StringBuilder(bizTypeLabel == null ? "" : bizTypeLabel);
+        // 2. 依次追加单号与往来单位，缺失片段直接省略
+        if (pending.orderNo() != null && !pending.orderNo().isBlank()) {
+            title.append(' ').append(pending.orderNo());
+        }
+        if (pending.partyName() != null && !pending.partyName().isBlank()) {
+            title.append(" · ").append(pending.partyName());
+        }
+        return title.toString().trim();
+    }
+
+    /**
+     * 工作台近效期预警：复用近效期清单（30 天）按效期升序取前 8 条。
+     *
+     * @return 近效期行，商品名由通用名/商品名/规格拼接
+     */
+    private List<DashboardNearExpiryVO> dashboardNearExpiry() {
+        // 1. 复用 30 天近效期清单（已按效期升序）
+        // 2. 截断到前 8 条并映射为工作台精简字段
+        return nearExpiryList(DEFAULT_NEAR_EXPIRY_DAYS).stream()
+                .limit(DASHBOARD_NEAR_EXPIRY_LIMIT)
+                .map(item -> new DashboardNearExpiryVO(item.productId(),
+                        displayProductName(item.genericName(), item.tradeName(), item.spec()),
+                        item.batchNo(), item.expireDate(), item.quantity(), item.daysLeft()))
+                .toList();
+    }
+
+    /**
+     * 拼接商品展示名：通用名（商品名）+ 规格，缺失片段自动省略。
+     *
+     * @param genericName 通用名，可空
+     * @param tradeName   商品名，可空；与通用名相同或为空时不重复展示
+     * @param spec        规格，可空
+     * @return 展示名，如「阿莫西林胶囊（阿莫仙） 0.25g*24 粒」
+     */
+    private String displayProductName(String genericName, String tradeName, String spec) {
+        // 1. 统一空值处理，避免拼接出 null
+        String generic = genericName == null ? "" : genericName.trim();
+        String trade = tradeName == null ? "" : tradeName.trim();
+        String specText = spec == null ? "" : spec.trim();
+        // 2. 通用名打底，再追加去重后的商品名与规格
+        StringBuilder name = new StringBuilder(generic);
+        // WHY: 商品名与通用名相同时（演示数据常见）不重复展示，避免「XX（XX）」
+        if (!trade.isBlank() && !trade.equals(generic)) {
+            if (name.length() > 0) {
+                name.append("（").append(trade).append("）");
+            } else {
+                name.append(trade);
+            }
+        }
+        if (!specText.isBlank()) {
+            if (name.length() > 0) {
+                name.append(' ');
+            }
+            name.append(specText);
+        }
+        return name.toString().trim();
+    }
+
+    /**
+     * 工作台本月商品销售排行：复用毛利报表（本月 1 日 ~ 今日）按销售金额降序取前 5。
+     *
+     * @param today 统计截止日（含）
+     * @return 排行行，amount 取毛利报表的 revenue（销售额，未扣成本）
+     */
+    private List<DashboardTopProductVO> dashboardTopProducts(LocalDate today) {
+        // 1. 统计区间：本月 1 日至今日
+        LocalDate monthStart = today.withDayOfMonth(1);
+        // 2. 取正收入商品按金额降序截断前 5，映射排行字段（amount = revenue）
+        return grossProfit(null, monthStart, today).stream()
+                .filter(row -> row.revenue() != null && row.revenue().compareTo(BigDecimal.ZERO) > 0)
+                .sorted(Comparator.comparing(GrossProfitVO::revenue).reversed())
+                .limit(DASHBOARD_TOP_PRODUCT_LIMIT)
+                .map(row -> new DashboardTopProductVO(row.productId(),
+                        row.productName() == null ? row.productCode() : row.productName(),
+                        row.quantity(), row.revenue()))
+                .toList();
     }
 
     /** 近 7 天趋势：每日入库金额（入库成本合计）/ 出库金额（订单单价合计），缺日补 0。 */

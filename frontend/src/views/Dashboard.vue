@@ -8,15 +8,6 @@
       <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
     </div>
 
-    <el-alert
-      v-if="fallbackMode"
-      class="fallback-alert"
-      type="info"
-      :closable="false"
-      show-icon
-      title="工作台聚合接口暂不可用，当前数字由待审批/近效期/证照预警接口拼装；进销存金额趋势待接口就绪后展示。"
-    />
-
     <!-- KPI 卡片 -->
     <div class="kpi-grid">
       <div
@@ -212,10 +203,7 @@ import {
   Warning,
   Money
 } from '@element-plus/icons-vue'
-import { getDashboard, listNearExpiryList, listGrossProfit } from '@/api/report'
-import { listPending } from '@/api/approval'
-import { listExpiringLicenses } from '@/api/quality'
-import { listExpiringLicenses as listStoreExpiring } from '@/api/store'
+import { getDashboard } from '@/api/report'
 import { useAuthStore } from '@/stores/auth'
 import { formatMoney, formatQty } from '@/utils/format'
 import type {
@@ -230,7 +218,6 @@ const router = useRouter()
 const authStore = useAuthStore()
 
 const loading = ref(false)
-const fallbackMode = ref(false)
 const data = ref<DashboardData | null>(null)
 
 const greeting = computed(() => {
@@ -309,91 +296,16 @@ function go(path: string, permission?: string) {
   router.push(path)
 }
 
-async function safe<T>(p: Promise<T>, fb: T): Promise<T> {
-  try {
-    return await p
-  } catch {
-    return fb
-  }
-}
-
-function last7Days(): string[] {
-  const days: string[] = []
-  for (let i = 6; i >= 0; i--) {
-    const d = new Date()
-    d.setDate(d.getDate() - i)
-    const m = String(d.getMonth() + 1).padStart(2, '0')
-    const day = String(d.getDate()).padStart(2, '0')
-    days.push(`${d.getFullYear()}-${m}-${day}`)
-  }
-  return days
-}
-
-function monthRange(): [string, string] {
-  const now = new Date()
-  const first = new Date(now.getFullYear(), now.getMonth(), 1)
-  const fmt = (d: Date) => {
-    const m = String(d.getMonth() + 1).padStart(2, '0')
-    const day = String(d.getDate()).padStart(2, '0')
-    return `${d.getFullYear()}-${m}-${day}`
-  }
-  return [fmt(first), fmt(now)]
-}
-
-// 聚合接口未就绪时的降级拼装：复用待审批/近效期/证照预警/毛利报表既有接口
-async function buildFallback(): Promise<DashboardData> {
-  const [from, to] = monthRange()
-  const [pending, nearExpiryList, licenses, storeLicenses, grossProfit] = await Promise.all([
-    safe(listPending(1, 5, true), { records: [], total: 0, page: 1, size: 5 }),
-    safe(listNearExpiryList(30, true), []),
-    safe(listExpiringLicenses(60, true), []),
-    safe(listStoreExpiring(60, true), []),
-    safe(listGrossProfit(undefined, from, to, true), [])
-  ])
-  return {
-    pendingApprovalCount: pending.total,
-    nearExpiryCount: nearExpiryList.length,
-    licenseExpiringCount: licenses.length + storeLicenses.length,
-    todayInboundAmount: 0,
-    todayOutboundAmount: 0,
-    trends: last7Days().map((date) => ({ date, inboundAmount: 0, outboundAmount: 0 })),
-    // 商品排行用毛利报表（本月）按收入降序取前 5
-    topProducts: grossProfit
-      .filter((g) => Number(g.revenue || 0) > 0)
-      .sort((a, b) => Number(b.revenue || 0) - Number(a.revenue || 0))
-      .slice(0, 5)
-      .map((g) => ({
-        productId: g.productId,
-        productName: g.productName || g.productCode,
-        quantity: g.quantity,
-        amount: g.revenue
-      })),
-    todos: pending.records.map((item) => ({
-      bizType: item.bizType,
-      bizId: item.bizId,
-      title: `${item.bizType === 'SALES_ORDER' ? '销售订单' : item.bizType === 'SALES_RETURN' ? '销售退货' : '采购订单'} ${item.orderNo || ''} · ${
-        item.partyName || ''
-      }`,
-      createdAt: item.orderDate
-    })),
-    nearExpiry: nearExpiryList.slice(0, 8).map((item) => ({
-      productId: item.productId,
-      productName: `${item.genericName || ''} ${item.tradeName || ''} ${item.spec || ''}`.trim(),
-      batchNo: item.batchNo,
-      expireDate: item.expireDate,
-      quantity: item.quantity,
-      warehouseName: item.warehouseName,
-      daysLeft: item.daysLeft
-    }))
-  }
-}
-
+/**
+ * 加载工作台数据：只请求聚合接口 /api/reports/dashboard 一次。
+ * 待办/近效期/商品排行由后端 DashboardVO 直接下发，前端不再降级拼装；
+ * 请求失败时仅结束 loading，错误提示交由 axios 拦截器统一处理。
+ */
 async function load() {
   loading.value = true
-  fallbackMode.value = false
   try {
     const raw = await getDashboard()
-    const normalized: DashboardData = {
+    data.value = {
       pendingApprovalCount: Number(raw.pendingApprovalCount || 0),
       nearExpiryCount: Number(raw.nearExpiryCount || 0),
       licenseExpiringCount: Number(raw.licenseExpiringCount || 0),
@@ -410,20 +322,8 @@ async function load() {
       todos: raw.todos,
       nearExpiry: raw.nearExpiry
     }
-    // 趋势/排行/待办/近效期后端未下发时，用既有接口补齐（保证页面完整可渲染）
-    if (!normalized.trends?.length || !normalized.todos?.length || !normalized.nearExpiry?.length) {
-      const extra = await buildFallback()
-      normalized.trends = normalized.trends?.length ? normalized.trends : extra.trends
-      normalized.todos = normalized.todos?.length ? normalized.todos : extra.todos
-      normalized.nearExpiry = normalized.nearExpiry?.length ? normalized.nearExpiry : extra.nearExpiry
-      normalized.topProducts = normalized.topProducts?.length
-        ? normalized.topProducts
-        : extra.topProducts
-    }
-    data.value = normalized
   } catch {
-    fallbackMode.value = true
-    data.value = await buildFallback()
+    // 失败不再发起降级请求；保持已有数据（首次为空态），仅结束 loading
   } finally {
     loading.value = false
   }
@@ -451,9 +351,6 @@ onMounted(load)
   margin-top: 4px;
   font-size: 13px;
   color: #909399;
-}
-.fallback-alert {
-  margin-bottom: 16px;
 }
 .kpi-grid {
   display: grid;
