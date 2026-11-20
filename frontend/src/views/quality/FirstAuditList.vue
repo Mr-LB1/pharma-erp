@@ -16,6 +16,7 @@
       <el-table-column label="操作" width="160" fixed="right">
         <template #default="{ row }">
           <el-button
+            v-permission="'quality:first-audit:approve'"
             link
             type="success"
             :loading="isActing(row as FirstAuditPendingItem, 'approve')"
@@ -25,6 +26,7 @@
             通过
           </el-button>
           <el-button
+            v-permission="'quality:first-audit:approve'"
             link
             type="danger"
             :loading="isActing(row as FirstAuditPendingItem, 'reject')"

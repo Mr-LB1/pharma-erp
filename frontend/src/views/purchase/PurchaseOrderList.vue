@@ -324,7 +324,7 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref, computed, onMounted } from 'vue'
+import { reactive, ref, computed, onMounted, onActivated } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { Search, Plus, Download } from '@element-plus/icons-vue'
 import {
@@ -342,7 +342,7 @@ import {
 import { listSuppliers } from '@/api/supplier'
 import { listProducts } from '@/api/product'
 import { statusLabel, statusTag } from '@/utils/status'
-import { formatMoney, disabledFutureDate } from '@/utils/format'
+import { formatMoney, disabledFutureDate, todayText } from '@/utils/format'
 import { saveBlob, dateStamp } from '@/utils/download'
 import { mergeById } from '@/utils/options'
 import { useRowAction } from '@/composables/useRowAction'
@@ -452,7 +452,8 @@ const editingId = ref<number | null>(null)
 
 const dialogTitle = computed(() => (editingId.value ? '编辑采购订单' : '新增采购订单'))
 
-const today = () => new Date().toISOString().slice(0, 10)
+// 默认业务日期取本地日历日，避免 toISOString() 的 UTC 偏移在东八区凌晨串天
+const today = () => todayText()
 
 const emptyItem = (): ItemRow => ({ productId: undefined, quantity: 1, unitPrice: 0 })
 
@@ -718,6 +719,18 @@ async function handleVoid(row: PurchaseOrder) {
 }
 
 onMounted(() => {
+  load()
+  loadOptions()
+})
+
+// keep-alive 多标签页：切回标签时刷新列表与下拉缓存，避免看到切走前的旧数据。
+// 首次 onActivated 紧随 onMounted（挂载即激活），用标记跳过，避免首屏重复请求。
+let activatedOnce = false
+onActivated(() => {
+  if (!activatedOnce) {
+    activatedOnce = true
+    return
+  }
   load()
   loadOptions()
 })

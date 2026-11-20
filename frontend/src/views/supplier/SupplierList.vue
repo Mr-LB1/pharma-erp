@@ -144,11 +144,8 @@
           </el-select>
         </el-form-item>
         <el-form-item label="首营状态">
-          <el-select v-model="form.firstAuditStatus" style="width: 100%">
-            <el-option label="待审核" value="PENDING" />
-            <el-option label="已通过" value="APPROVED" />
-            <el-option label="已驳回" value="REJECTED" />
-          </el-select>
+          <!-- 首营状态只读：普通新增/编辑不能手动置为 APPROVED，只能由首营审核流程流转 -->
+          <el-input :model-value="auditLabel(form.firstAuditStatus)" disabled />
         </el-form-item>
         <el-form-item label="状态">
           <el-select v-model="form.status" style="width: 100%">
@@ -181,7 +178,7 @@ import BatchToolbar from '@/components/BatchToolbar.vue'
 import ImportDrawer from '@/components/ImportDrawer.vue'
 import { useBatchOperation } from '@/composables/useBatchOperation'
 import { useRowAction } from '@/composables/useRowAction'
-import { disabledPastDate } from '@/utils/format'
+import { disabledPastDate, todayText } from '@/utils/format'
 import type { Supplier } from '@/types'
 
 const { isActing, isBlocked, run } = useRowAction()
@@ -225,9 +222,10 @@ function auditLabel(v: string) {
 function auditTag(v: string) {
   return { PENDING: 'warning', APPROVED: 'success', REJECTED: 'danger' }[v] as 'warning' | 'success' | 'danger' | 'info' || 'info'
 }
+// 证照是否已过期：按本地日历日比较，避免 toISOString() 的 UTC 偏移导致跨天误判
 function isExpired(dateStr: string) {
   if (!dateStr) return false
-  return dateStr < new Date().toISOString().slice(0, 10)
+  return dateStr < todayText()
 }
 
 async function load() {

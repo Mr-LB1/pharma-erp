@@ -7,7 +7,7 @@
       <el-button :icon="Refresh" @click="load">刷新</el-button>
     </div>
 
-    <el-table :data="list" v-loading="loading" border stripe row-key="bizId">
+    <el-table :data="list" v-loading="loading" border stripe :row-key="rowKey">
       <el-table-column type="expand">
         <template #default="{ row }">
           <div class="expand-box">
@@ -55,8 +55,8 @@
               v-permission="'approval:approve'"
               link
               type="success"
-              :loading="isActing(row.bizId, 'approve')"
-              :disabled="isBlocked() && !isActing(row.bizId, 'approve')"
+              :loading="isActing(rowKey(row), 'approve')"
+              :disabled="isBlocked() && !isActing(rowKey(row), 'approve')"
               @click="handleApprove(row as ApprovalPendingItem)"
             >
               通过
@@ -65,8 +65,8 @@
               v-permission="'approval:approve'"
               link
               type="danger"
-              :loading="isActing(row.bizId, 'reject')"
-              :disabled="isBlocked() && !isActing(row.bizId, 'reject')"
+              :loading="isActing(rowKey(row), 'reject')"
+              :disabled="isBlocked() && !isActing(rowKey(row), 'reject')"
               @click="handleReject(row as ApprovalPendingItem)"
             >
               驳回
@@ -91,7 +91,7 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref, onMounted } from 'vue'
+import { reactive, ref, onMounted, onActivated } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import { listPending, approve, reject } from '@/api/approval'
@@ -156,6 +156,13 @@ function itemAmount(it: ApprovalPendingItemDetail) {
   return (it.quantity || 0) * it.unitPrice
 }
 
+// 待审批列表混合 7 类单据，各类单据的 bizId 取自各自表主键会重复；
+// 统一用「单据类型-bizId」组合 key，避免 row-key / 行级操作状态串行
+// （参数保留结构化可选字段，以兼容 el-table 插槽传入的 DefaultRow）
+function rowKey(row: { bizType?: string; bizId?: number }) {
+  return `${row.bizType}-${row.bizId}`
+}
+
 // 审批回避：审批人不能与制单人相同（后端同样返回 403）
 function isSelf(row: ApprovalPendingItem) {
   const me = auth.user?.username
@@ -198,7 +205,7 @@ async function handleApprove(row: ApprovalPendingItem) {
     return
   }
   await run(
-    row.bizId,
+    rowKey(row),
     async () => {
       await approve(row.bizType, row.bizId, comment || undefined)
       ElMessage.success('已通过')
@@ -228,7 +235,7 @@ async function handleReject(row: ApprovalPendingItem) {
     return
   }
   await run(
-    row.bizId,
+    rowKey(row),
     async () => {
       await reject(row.bizType, row.bizId, comment)
       ElMessage.success('已驳回')
@@ -239,6 +246,17 @@ async function handleReject(row: ApprovalPendingItem) {
 }
 
 onMounted(load)
+
+// keep-alive 多标签页：切回标签时刷新列表，避免看到切走前的旧数据。
+// 首次 onActivated 紧随 onMounted（挂载即激活），用标记跳过，避免首屏重复请求。
+let activatedOnce = false
+onActivated(() => {
+  if (!activatedOnce) {
+    activatedOnce = true
+    return
+  }
+  load()
+})
 </script>
 
 <style scoped>

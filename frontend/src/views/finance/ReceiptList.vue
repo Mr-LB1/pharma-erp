@@ -17,12 +17,17 @@
           clearable
           filterable
           remote
-          :remote-method="searchCustomers"
-          :loading="customerLoading"
+          :remote-method="searchFilterCustomers"
+          :loading="filterCustomerLoading"
           style="width: 240px"
           @change="handleSearch"
         >
-          <el-option v-for="c in customerOptions" :key="c.id" :label="c.name" :value="c.id!" />
+          <el-option
+            v-for="c in filterCustomerOptions"
+            :key="c.id"
+            :label="c.name"
+            :value="c.id!"
+          />
         </el-select>
         <el-button type="primary" :icon="Search" @click="handleSearch">搜索</el-button>
       </div>
@@ -103,13 +108,13 @@
                 placeholder="输入名称远程搜索客户"
                 filterable
                 remote
-                :remote-method="searchCustomers"
-                :loading="customerLoading"
+                :remote-method="searchFormCustomers"
+                :loading="formCustomerLoading"
                 style="width: 100%"
                 @change="handleCustomerChange"
               >
                 <el-option
-                  v-for="c in customerOptions"
+                  v-for="c in formCustomerOptions"
                   :key="c.id"
                   :label="c.name"
                   :value="c.id!"
@@ -194,9 +199,13 @@ const total = ref(0)
 const loading = ref(false)
 const query = reactive({ keyword: '', customerId: undefined as number | undefined, page: 1, size: 20 })
 
+// 客户下拉：筛选栏与新建弹窗各用一套展示选项和搜索函数，
+// 否则筛选框会按弹窗的 form.customerId 合并选项，回显成数字
 const customers = ref<Customer[]>([])
-const customerOptions = ref<Customer[]>([])
-const customerLoading = ref(false)
+const filterCustomerOptions = ref<Customer[]>([])
+const formCustomerOptions = ref<Customer[]>([])
+const filterCustomerLoading = ref(false)
+const formCustomerLoading = ref(false)
 
 const dialogVisible = ref(false)
 const saving = ref(false)
@@ -238,15 +247,29 @@ function handleSearch() {
   load()
 }
 
-async function searchCustomers(keyword: string) {
-  customerLoading.value = true
+// 筛选栏远程搜索：保留的对象是筛选条件 query.customerId
+async function searchFilterCustomers(keyword: string) {
+  filterCustomerLoading.value = true
+  try {
+    const data = await listCustomers(keyword, 1, 30, 'ACTIVE')
+    const selected = customers.value.find((c) => c.id === query.customerId)
+    filterCustomerOptions.value = selected ? mergeById([selected], data.records) : data.records
+    customers.value = mergeById(customers.value, data.records)
+  } finally {
+    filterCustomerLoading.value = false
+  }
+}
+
+// 新建弹窗远程搜索：保留的对象是表单 form.customerId
+async function searchFormCustomers(keyword: string) {
+  formCustomerLoading.value = true
   try {
     const data = await listCustomers(keyword, 1, 30, 'ACTIVE')
     const selected = customers.value.find((c) => c.id === form.customerId)
-    customerOptions.value = selected ? mergeById([selected], data.records) : data.records
+    formCustomerOptions.value = selected ? mergeById([selected], data.records) : data.records
     customers.value = mergeById(customers.value, data.records)
   } finally {
-    customerLoading.value = false
+    formCustomerLoading.value = false
   }
 }
 
@@ -318,7 +341,8 @@ onMounted(async () => {
   try {
     const data = await listCustomers('', 1, 50, 'ACTIVE')
     customers.value = data.records
-    customerOptions.value = data.records
+    filterCustomerOptions.value = data.records
+    formCustomerOptions.value = data.records
   } catch {
     // 下拉加载失败不阻塞列表
   }

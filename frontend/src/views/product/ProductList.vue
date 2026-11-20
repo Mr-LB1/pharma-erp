@@ -171,11 +171,8 @@
           </el-col>
           <el-col :span="12">
             <el-form-item label="首营状态" prop="firstAuditStatus">
-              <el-select v-model="form.firstAuditStatus" placeholder="请选择" style="width: 100%">
-                <el-option label="待审核" value="PENDING" />
-                <el-option label="已通过" value="APPROVED" />
-                <el-option label="已驳回" value="REJECTED" />
-              </el-select>
+              <!-- 首营状态只读：普通新增/编辑不能手动置为 APPROVED，只能由首营审核流程流转 -->
+              <el-input :model-value="auditLabel(form.firstAuditStatus)" disabled />
             </el-form-item>
           </el-col>
           <el-col :span="12">

@@ -17,12 +17,17 @@
           clearable
           filterable
           remote
-          :remote-method="searchSuppliers"
-          :loading="supplierLoading"
+          :remote-method="searchFilterSuppliers"
+          :loading="filterSupplierLoading"
           style="width: 240px"
           @change="handleSearch"
         >
-          <el-option v-for="s in supplierOptions" :key="s.id" :label="s.name" :value="s.id!" />
+          <el-option
+            v-for="s in filterSupplierOptions"
+            :key="s.id"
+            :label="s.name"
+            :value="s.id!"
+          />
         </el-select>
         <el-button type="primary" :icon="Search" @click="handleSearch">搜索</el-button>
       </div>
@@ -103,13 +108,13 @@
                 placeholder="输入名称远程搜索供应商"
                 filterable
                 remote
-                :remote-method="searchSuppliers"
-                :loading="supplierLoading"
+                :remote-method="searchFormSuppliers"
+                :loading="formSupplierLoading"
                 style="width: 100%"
                 @change="handleSupplierChange"
               >
                 <el-option
-                  v-for="s in supplierOptions"
+                  v-for="s in formSupplierOptions"
                   :key="s.id"
                   :label="s.name"
                   :value="s.id!"
@@ -207,9 +212,13 @@ useQuerySync(query, ['keyword', 'supplierId', 'page', 'size'], {
   numeric: ['supplierId', 'page', 'size']
 })
 
+// 供应商下拉：筛选栏与新建弹窗各用一套展示选项和搜索函数，
+// 否则筛选框会按弹窗的 form.supplierId 合并选项，回显成数字
 const suppliers = ref<Supplier[]>([])
-const supplierOptions = ref<Supplier[]>([])
-const supplierLoading = ref(false)
+const filterSupplierOptions = ref<Supplier[]>([])
+const formSupplierOptions = ref<Supplier[]>([])
+const filterSupplierLoading = ref(false)
+const formSupplierLoading = ref(false)
 
 const dialogVisible = ref(false)
 const saving = ref(false)
@@ -251,15 +260,29 @@ function handleSearch() {
   load()
 }
 
-async function searchSuppliers(keyword: string) {
-  supplierLoading.value = true
+// 筛选栏远程搜索：保留的对象是筛选条件 query.supplierId
+async function searchFilterSuppliers(keyword: string) {
+  filterSupplierLoading.value = true
+  try {
+    const data = await listSuppliers(keyword, 1, 30, 'ACTIVE')
+    const selected = suppliers.value.find((s) => s.id === query.supplierId)
+    filterSupplierOptions.value = selected ? mergeById([selected], data.records) : data.records
+    suppliers.value = mergeById(suppliers.value, data.records)
+  } finally {
+    filterSupplierLoading.value = false
+  }
+}
+
+// 新建弹窗远程搜索：保留的对象是表单 form.supplierId
+async function searchFormSuppliers(keyword: string) {
+  formSupplierLoading.value = true
   try {
     const data = await listSuppliers(keyword, 1, 30, 'ACTIVE')
     const selected = suppliers.value.find((s) => s.id === form.supplierId)
-    supplierOptions.value = selected ? mergeById([selected], data.records) : data.records
+    formSupplierOptions.value = selected ? mergeById([selected], data.records) : data.records
     suppliers.value = mergeById(suppliers.value, data.records)
   } finally {
-    supplierLoading.value = false
+    formSupplierLoading.value = false
   }
 }
 
@@ -331,7 +354,8 @@ onMounted(async () => {
   try {
     const data = await listSuppliers('', 1, 50, 'ACTIVE')
     suppliers.value = data.records
-    supplierOptions.value = data.records
+    filterSupplierOptions.value = data.records
+    formSupplierOptions.value = data.records
   } catch {
     // 下拉加载失败不阻塞列表
   }

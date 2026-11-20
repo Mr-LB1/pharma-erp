@@ -127,8 +127,9 @@
       </el-table-column>
       <el-table-column label="操作" width="180" fixed="right">
         <template #default="{ row }">
+          <!-- 草稿可提交；被驳回（REJECTED）允许修改后重新提交 -->
           <el-button
-            v-if="row.status === 'DRAFT'"
+            v-if="row.status === 'DRAFT' || row.status === 'REJECTED'"
             v-permission="'sales:return:create'"
             link
             type="primary"
@@ -136,7 +137,7 @@
             :disabled="isBlocked() && !isActing(row.id!, 'submit')"
             @click="handleSubmit(row as SalesReturn)"
           >
-            提交审批
+            {{ row.status === 'REJECTED' ? '重新提交' : '提交审批' }}
           </el-button>
           <el-button
             v-else-if="row.status === 'APPROVED'"
@@ -383,14 +384,15 @@
       :remark="detail?.reason"
     >
       <template #actions>
+        <!-- 草稿可提交；被驳回（REJECTED）允许修改后重新提交 -->
         <el-button
-          v-if="detail?.status === 'DRAFT'"
+          v-if="detail?.status === 'DRAFT' || detail?.status === 'REJECTED'"
           v-permission="'sales:return:create'"
           type="primary"
           :loading="isActing(detail.id ?? 0, 'submit')"
           @click="handleSubmit(detail!)"
         >
-          提交审批
+          {{ detail?.status === 'REJECTED' ? '重新提交' : '提交审批' }}
         </el-button>
         <el-button
           v-if="detail?.status === 'APPROVED'"
@@ -415,7 +417,7 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref, computed, onMounted } from 'vue'
+import { reactive, ref, computed, onMounted, onActivated } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { Search, Plus, Download } from '@element-plus/icons-vue'
 import {
@@ -461,7 +463,7 @@ interface InspectRow {
   rejectReason: string
 }
 
-const STATUS_OPTIONS = ['DRAFT', 'SUBMITTED', 'APPROVED', 'RECEIVED', 'VOID']
+const STATUS_OPTIONS = ['DRAFT', 'SUBMITTED', 'REJECTED', 'APPROVED', 'RECEIVED', 'VOID']
 
 const list = ref<SalesReturn[]>([])
 const total = ref(0)
@@ -856,8 +858,8 @@ async function handleInspect() {
   }
 }
 
-onMounted(async () => {
-  load()
+// 下拉选项预热：仓库/商品/门店，用于筛选与明细名称回显
+async function loadOptions() {
   try {
     const [w, p, s] = await Promise.all([
       listWarehouses('', 1, 50, 'ACTIVE'),
@@ -874,6 +876,23 @@ onMounted(async () => {
   } catch {
     // 下拉加载失败不阻塞列表
   }
+}
+
+onMounted(() => {
+  load()
+  loadOptions()
+})
+
+// keep-alive 多标签页：切回标签时刷新列表与下拉缓存，避免看到切走前的旧数据。
+// 首次 onActivated 紧随 onMounted（挂载即激活），用标记跳过，避免首屏重复请求。
+let activatedOnce = false
+onActivated(() => {
+  if (!activatedOnce) {
+    activatedOnce = true
+    return
+  }
+  load()
+  loadOptions()
 })
 </script>
 

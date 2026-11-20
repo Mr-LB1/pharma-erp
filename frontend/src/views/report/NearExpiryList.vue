@@ -76,6 +76,10 @@ const query = reactive({ days: 30, page: 1, size: 20 })
 // 筛选条件同步到地址栏（刷新/分享链接不丢筛选）
 useQuerySync(query, ['days', 'page', 'size'], { numeric: ['days', 'page', 'size'] })
 
+// 已生效的查询条件快照：load() 成功后记录，导出只能使用它，
+// 避免用户改了下拉/输入但没点查询时，导出口径与屏幕表格不一致
+const appliedQuery = ref<{ days: number } | null>(null)
+
 function expireText(daysLeft?: number) {
   if (daysLeft == null) return '-'
   if (daysLeft < 0) return '已过期'
@@ -96,6 +100,8 @@ async function load() {
     const data = await nearExpiryPage(query.days, query.page, query.size)
     list.value = data.records
     total.value = data.total
+    // 只有本次查询成功才刷新快照，导出与当前列表保持同一口径
+    appliedQuery.value = { days: query.days }
   } finally {
     loading.value = false
   }
@@ -112,9 +118,14 @@ function handleSizeChange() {
 }
 
 async function handleExport() {
+  // 导出必须与屏幕上最后一次查询结果口径一致；尚无快照说明还没查过
+  if (!appliedQuery.value) {
+    ElMessage.warning('请先查询后再导出')
+    return
+  }
   exporting.value = true
   try {
-    const blob = await exportNearExpiry(query.days)
+    const blob = await exportNearExpiry(appliedQuery.value.days)
     saveBlob(blob, `近效期清单_${dateStamp()}.xlsx`)
     ElMessage.success('导出成功')
   } catch (e) {
