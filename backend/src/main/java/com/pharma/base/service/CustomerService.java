@@ -46,12 +46,22 @@ public class CustomerService {
         return customer;
     }
 
+    /**
+     * 新增客户。
+     * <p>首营状态一律由系统置为 PENDING（忽略客户端传值），后续只能经 FirstAuditService 审核流转，
+     * 避免新增资料直接以 APPROVED 落库绕过首营审核（P0-4）。</p>
+     *
+     * @param customer 待新增客户，其 firstAuditStatus 传值不生效
+     * @return 保存后的客户
+     */
     @Transactional
     public Customer create(Customer customer) {
         if (customer.getName() == null || customer.getName().isBlank()) {
             throw BusinessException.badRequest("客户名称不能为空");
         }
         validateEnums(customer);
+        // P0-4 首营越权：新增资料强制 PENDING，覆盖客户端传入的 firstAuditStatus
+        customer.setFirstAuditStatus(FirstAuditStatus.PENDING.name());
         customer.setId(null);
         // P2-10 首营本人回避：记录资料创建人
         customer.setCreatedBy(SecurityUtils.currentUser());

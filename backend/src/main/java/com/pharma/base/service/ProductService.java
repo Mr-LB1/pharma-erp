@@ -65,6 +65,14 @@ public class ProductService {
         return product;
     }
 
+    /**
+     * 新增商品。
+     * <p>首营状态一律由系统置为 PENDING（忽略客户端传值），后续只能经 FirstAuditService 审核流转，
+     * 避免新增资料直接以 APPROVED 落库绕过首营审核（P0-4）。</p>
+     *
+     * @param product 待新增商品，其 firstAuditStatus 传值不生效
+     * @return 保存后的商品
+     */
     @Transactional
     public Product create(Product product) {
         if (product.getCode() == null || product.getCode().isBlank()) {
@@ -77,6 +85,8 @@ public class ProductService {
             throw BusinessException.badRequest("商品编码已存在: " + product.getCode());
         }
         validateEnums(product);
+        // P0-4 首营越权：新增资料强制 PENDING，覆盖客户端传入的 firstAuditStatus
+        product.setFirstAuditStatus(FirstAuditStatus.PENDING.name());
         product.setId(null);
         // P2-10 首营本人回避：记录资料创建人
         product.setCreatedBy(SecurityUtils.currentUser());

@@ -46,12 +46,22 @@ public class SupplierService {
         return supplier;
     }
 
+    /**
+     * 新增供应商。
+     * <p>首营状态一律由系统置为 PENDING（忽略客户端传值），后续只能经 FirstAuditService 审核流转，
+     * 避免新增资料直接以 APPROVED 落库绕过首营审核（P0-4）。</p>
+     *
+     * @param supplier 待新增供应商，其 firstAuditStatus 传值不生效
+     * @return 保存后的供应商
+     */
     @Transactional
     public Supplier create(Supplier supplier) {
         if (supplier.getName() == null || supplier.getName().isBlank()) {
             throw BusinessException.badRequest("供应商名称不能为空");
         }
         validateEnums(supplier);
+        // P0-4 首营越权：新增资料强制 PENDING，覆盖客户端传入的 firstAuditStatus
+        supplier.setFirstAuditStatus(FirstAuditStatus.PENDING.name());
         supplier.setId(null);
         // P2-10 首营本人回避：记录资料创建人
         supplier.setCreatedBy(SecurityUtils.currentUser());
