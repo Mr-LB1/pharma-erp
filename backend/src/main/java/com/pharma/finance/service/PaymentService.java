@@ -15,6 +15,7 @@ import com.pharma.finance.repository.ApInvoiceRepository;
 import com.pharma.finance.repository.PaymentItemRepository;
 import com.pharma.finance.repository.PaymentRepository;
 import com.pharma.inventory.service.InventoryLedgerService;
+import com.pharma.system.service.AuditLogService;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
@@ -25,8 +26,12 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -42,23 +47,37 @@ public class PaymentService {
     private final SupplierRepository supplierRepository;
     private final ArApService arApService;
     private final InventoryLedgerService ledger;
+    /** 审计日志服务：付款核销留痕（与业务同事务，失败一起回滚）。 */
+    private final AuditLogService auditLogService;
 
     public PaymentService(PaymentRepository paymentRepository,
                           PaymentItemRepository paymentItemRepository,
                           ApInvoiceRepository apInvoiceRepository,
                           SupplierRepository supplierRepository,
                           ArApService arApService,
-                          InventoryLedgerService ledger) {
+                          InventoryLedgerService ledger,
+                          AuditLogService auditLogService) {
         this.paymentRepository = paymentRepository;
         this.paymentItemRepository = paymentItemRepository;
         this.apInvoiceRepository = apInvoiceRepository;
         this.supplierRepository = supplierRepository;
         this.arApService = arApService;
         this.ledger = ledger;
+        this.auditLogService = auditLogService;
     }
 
+    /**
+     * 创建付款单并对目标应付单核销：同一应付单在一张付款单内只允许出现一次；
+     * 按应付单 ID 升序加行级悲观锁后重读未结金额校验，防止并发重复核销与超付；
+     * 成功后写审计日志留痕（付款单号、供应商、金额、逐行核销明细）。
+     *
+     * @param req 付款创建请求（供应商、核销明细、可选付款金额与备注）
+     * @return 付款单视图，含逐行核销明细结果
+     * @throws BusinessException 供应商/应付单不存在、明细重复、应付单已作废或核销金额超过未结金额时抛出 400
+     */
     @Transactional
     public PaymentVO create(PaymentCreateRequest req) {
+        // 1. 基础校验：付款供应商与核销明细不能为空，供应商必须存在
         if (req == null || req.supplierId() == null) {
             throw BusinessException.badRequest("付款供应商不能为空");
         }
@@ -69,38 +88,56 @@ public class PaymentService {
             throw BusinessException.badRequest("付款核销明细不能为空");
         }
 
-        BigDecimal total = BigDecimal.ZERO;
-        List<ApInvoice> invoices = new ArrayList<>();
-        for (PaymentItemRequest it : items) {
-            if (it.apInvoiceId() == null) {
+        // 2. 明细校验 + 去重：同一应付单重复出现直接拒绝，避免逐行叠加绕过未结金额校验
+        Set<Long> apInvoiceIdSet = new LinkedHashSet<>();
+        for (PaymentItemRequest item : items) {
+            if (item.apInvoiceId() == null) {
                 throw BusinessException.badRequest("应付单不能为空");
             }
-            if (it.amount() == null || it.amount().compareTo(BigDecimal.ZERO) <= 0) {
+            if (item.amount() == null || item.amount().compareTo(BigDecimal.ZERO) <= 0) {
                 throw BusinessException.badRequest("核销金额必须大于0");
             }
-            ApInvoice ap = apInvoiceRepository.findById(it.apInvoiceId())
-                    .orElseThrow(() -> BusinessException.badRequest("应付单不存在: " + it.apInvoiceId()));
-            if (!req.supplierId().equals(ap.getSupplierId())) {
-                throw BusinessException.badRequest("应付单不属于该供应商: " + ap.getInvoiceNo());
+            if (!apInvoiceIdSet.add(item.apInvoiceId())) {
+                throw BusinessException.badRequest("同一应付单不可重复核销: " + item.apInvoiceId());
             }
-            if (ArApService.STATUS_VOID.equals(ap.getStatus())) {
-                throw BusinessException.badRequest("应付单已作废，不可核销: " + ap.getInvoiceNo());
-            }
-            BigDecimal outstanding = ap.getInvoiceAmount().subtract(ap.getSettledAmount());
-            if (it.amount().compareTo(outstanding) > 0) {
-                throw BusinessException.badRequest("核销金额超过应付未结金额: " + ap.getInvoiceNo()
-                        + " 未结 " + outstanding.toPlainString() + " < 核销 " + it.amount().toPlainString());
-            }
-            total = total.add(it.amount());
-            invoices.add(ap);
         }
 
+        // 3. 按应付单 ID 升序加悲观写锁：固定加锁顺序避免并发死锁，锁后读取最新已核销金额
+        List<Long> apInvoiceIdList = new ArrayList<>(apInvoiceIdSet);
+        apInvoiceIdList.sort(Comparator.naturalOrder());
+        Map<Long, ApInvoice> apInvoiceMap = new HashMap<>();
+        for (Long apInvoiceId : apInvoiceIdList) {
+            ApInvoice lockedInvoice = apInvoiceRepository.findByIdForUpdate(apInvoiceId)
+                    .orElseThrow(() -> BusinessException.badRequest("应付单不存在: " + apInvoiceId));
+            apInvoiceMap.put(apInvoiceId, lockedInvoice);
+        }
+
+        // 4. 锁后逐行校验：供应商归属、作废状态、未结金额均以锁定的最新数据为准
+        BigDecimal total = BigDecimal.ZERO;
+        for (PaymentItemRequest item : items) {
+            ApInvoice apInvoice = apInvoiceMap.get(item.apInvoiceId());
+            if (!req.supplierId().equals(apInvoice.getSupplierId())) {
+                throw BusinessException.badRequest("应付单不属于该供应商: " + apInvoice.getInvoiceNo());
+            }
+            if (ArApService.STATUS_VOID.equals(apInvoice.getStatus())) {
+                throw BusinessException.badRequest("应付单已作废，不可核销: " + apInvoice.getInvoiceNo());
+            }
+            BigDecimal outstanding = apInvoice.getInvoiceAmount().subtract(apInvoice.getSettledAmount());
+            if (item.amount().compareTo(outstanding) > 0) {
+                throw BusinessException.badRequest("核销金额超过应付未结金额: " + apInvoice.getInvoiceNo()
+                        + " 未结 " + outstanding.toPlainString() + " < 核销 " + item.amount().toPlainString());
+            }
+            total = total.add(item.amount());
+        }
+
+        // 5. 付款金额与核销明细合计一致性校验（未传 amount 时以明细合计为准）
         BigDecimal amount = req.amount() == null ? total : req.amount();
         if (amount.compareTo(total) != 0) {
             throw BusinessException.badRequest("付款金额与核销明细合计不一致: 付款 " + amount.toPlainString()
                     + "，明细合计 " + total.toPlainString());
         }
 
+        // 6. 落付款单头（金额按分保留两位小数）
         Payment payment = new Payment();
         payment.setPaymentNo(ledger.genNo("FK"));
         payment.setSupplierId(req.supplierId());
@@ -110,28 +147,55 @@ public class PaymentService {
         payment.setCreatedBy(ledger.currentUser());
         payment = paymentRepository.save(payment);
 
+        // 7. 逐行写核销明细并累加应付已核销金额、推进核销状态
         List<PaymentItemVO> itemVOs = new ArrayList<>();
-        for (int i = 0; i < items.size(); i++) {
-            PaymentItemRequest it = items.get(i);
-            ApInvoice ap = invoices.get(i);
+        for (PaymentItemRequest item : items) {
+            ApInvoice apInvoice = apInvoiceMap.get(item.apInvoiceId());
 
-            PaymentItem pi = new PaymentItem();
-            pi.setPaymentId(payment.getId());
-            pi.setApInvoiceId(ap.getId());
-            pi.setAmount(it.amount().setScale(2, RoundingMode.HALF_UP));
-            pi = paymentItemRepository.save(pi);
+            PaymentItem paymentItem = new PaymentItem();
+            paymentItem.setPaymentId(payment.getId());
+            paymentItem.setApInvoiceId(apInvoice.getId());
+            paymentItem.setAmount(item.amount().setScale(2, RoundingMode.HALF_UP));
+            paymentItem = paymentItemRepository.save(paymentItem);
 
-            BigDecimal settled = ap.getSettledAmount().add(it.amount());
-            ap.setSettledAmount(settled);
-            ap.setStatus(arApService.settleStatus(ap.getInvoiceAmount(), settled));
-            apInvoiceRepository.save(ap);
+            BigDecimal settledAmount = apInvoice.getSettledAmount().add(item.amount());
+            apInvoice.setSettledAmount(settledAmount);
+            apInvoice.setStatus(arApService.settleStatus(apInvoice.getInvoiceAmount(), settledAmount));
+            apInvoiceRepository.save(apInvoice);
 
-            itemVOs.add(new PaymentItemVO(pi.getId(), ap.getId(), ap.getInvoiceNo(), pi.getAmount()));
+            itemVOs.add(new PaymentItemVO(paymentItem.getId(), apInvoice.getId(), apInvoice.getInvoiceNo(),
+                    paymentItem.getAmount()));
         }
 
+        // 8. 审计留痕：记录付款单号、供应商、金额与逐行核销明细（与业务同事务，失败一起回滚）
+        String supplierName = supplierName(payment.getSupplierId());
+        auditLogService.log(payment.getCreatedBy(), "CREATE_PAYMENT", "PAYMENT", payment.getId(),
+                "创建付款单 " + payment.getPaymentNo() + "，供应商 " + supplierName + "（" + payment.getSupplierId()
+                        + "），金额 " + payment.getAmount().toPlainString()
+                        + "，核销明细 " + auditItemDetail(items, apInvoiceMap),
+                null, AuditLogService.json("paymentNo", payment.getPaymentNo(),
+                        "supplierId", payment.getSupplierId(), "supplierName", supplierName,
+                        "amount", payment.getAmount(), "itemCount", items.size()));
+
+        // 9. 组装返回视图
         return new PaymentVO(payment.getId(), payment.getPaymentNo(), payment.getSupplierId(),
-                supplierName(payment.getSupplierId()), payment.getAmount(), payment.getStatus(),
+                supplierName, payment.getAmount(), payment.getStatus(),
                 payment.getRemark(), payment.getCreatedBy(), payment.getCreatedAt(), itemVOs);
+    }
+
+    /**
+     * 拼接付款核销明细审计文本：每行「应付发票号:核销金额」，超长截断以适配 audit_log.detail(1000)。
+     *
+     * @param items        付款核销明细请求
+     * @param apInvoiceMap 已加锁的应付单，key 为应付单 ID
+     * @return 形如「AP20261120000001:30.00, AP20261120000002:20.00」的审计文本
+     */
+    private String auditItemDetail(List<PaymentItemRequest> items, Map<Long, ApInvoice> apInvoiceMap) {
+        String detail = items.stream()
+                .map(item -> apInvoiceMap.get(item.apInvoiceId()).getInvoiceNo() + ":"
+                        + item.amount().setScale(2, RoundingMode.HALF_UP).toPlainString())
+                .collect(Collectors.joining(", "));
+        return detail.length() <= 800 ? detail : detail.substring(0, 800) + "...";
     }
 
     public PageResult<PaymentVO> list(Long supplierId, String keyword, int page, int size) {
