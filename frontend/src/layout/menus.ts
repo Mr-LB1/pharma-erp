@@ -11,7 +11,8 @@ import {
   Connection,
   DocumentChecked,
   Stamp,
-  Setting,
+  Tools,
+  SetUp,
   Warning,
   Files,
   Document,
@@ -137,10 +138,10 @@ export const MENUS: MenuNode[] = [
   {
     key: 'system',
     title: '系统管理',
-    icon: Setting,
+    icon: Tools,
     children: [
       { path: '/system/users', title: '用户管理', icon: User, permission: 'system:user:view' },
-      { path: '/system/roles', title: '角色管理', icon: Setting, permission: 'system:role:view' },
+      { path: '/system/roles', title: '角色管理', icon: SetUp, permission: 'system:role:view' },
       { path: '/system/audit-logs', title: '审计日志', icon: Document, permission: 'system:audit-log:view' }
     ]
   }

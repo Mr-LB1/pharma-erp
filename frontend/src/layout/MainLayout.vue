@@ -237,6 +237,14 @@ async function handleCommand(cmd: string) {
   border-right: none;
 }
 
+/* 侧栏分组瞬时展开/收起：Element Plus 对 .el-menu--inline 用 max-height/padding 过渡，
+   展开时逐帧触发布局与重绘（掉帧）；这里过渡与动画都不保留，避免创建动画合成层后
+   其持续期间图标（如“系统管理”齿轮）未被绘制而闪动。高度与 display 仍由
+   Element Plus 控制；折叠模式下子菜单渲染在 body 上的 popper 里，不含该元素。 */
+.menu :deep(.el-menu--inline) {
+  transition: none !important;
+}
+
 .menu :deep(.el-menu-item-group__title) {
   padding-top: 12px;
   color: rgba(255, 255, 255, 0.35);
