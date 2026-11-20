@@ -364,13 +364,21 @@ function filterHeaders(headers) {
 }
 
 /**
- * /api/* 反向代理：保留 method / headers（含 Origin、Cookie、Content-Type）/ body，
+ * /api/* 反向代理：保留 method / headers（含 Cookie、Content-Type）/ body，
  * 仅把 Host 覆写为后端地址；上游不可达或超时统一回 502。
+ *
+ * 关键：必须剥离浏览器的 Origin 首部。
+ * 浏览器对同源 POST/PUT/DELETE 也会携带 Origin，但它并不需要 CORS 校验（响应回到同源页面）。
+ * 若把 Origin 原样转给后端，Spring Security 会把它当成跨域请求校验白名单，
+ * 于是任何未登记在 app.cors.allowed-origins 里的访问域名（例如 cpolar 每次变动的隧道域名）
+ * 都会被判定为 "Invalid CORS request" 直接 403 —— 表现为"登录失败"。
+ * 剥离后后端按普通同源请求处理，隧道换域名也无需改配置。
  */
 function proxyApi(req, res) {
   const headers = filterHeaders(req.headers)
   headers.host = API_HOST_HEADER
-  // 便于后端排查真实来源，同时不影响 cpolar 域名的 CORS 判断（Origin 原样保留）
+  delete headers.origin
+  // 便于后端排查真实来源
   headers['x-forwarded-host'] = req.headers.host || ''
   headers['x-forwarded-for'] = req.socket.remoteAddress || ''
   headers['x-forwarded-proto'] = 'http'

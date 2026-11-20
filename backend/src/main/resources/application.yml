@@ -60,7 +60,7 @@ app:
   # 内网穿透演示域名（cpolar 隧道，浏览器 POST 请求携带 Origin 头会被 CORS 过滤器校验）；
   # 生产用 CORS_ALLOWED_ORIGINS 注入真实域名
   cors:
-    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://127.0.0.1:5173,https://*.cpolar.top,http://*.cpolar.top}
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://127.0.0.1:5173,https://*.cpolar.top,http://*.cpolar.top,https://*.cpolar.cn,http://*.cpolar.cn}
 
   # 单据业务日期校验（P2-6）：允许回填的最大天数，超过则 400
   biz-date:
