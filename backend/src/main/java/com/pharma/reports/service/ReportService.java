@@ -246,7 +246,10 @@ public class ReportService {
         return new PageResult<>(records, total == null ? 0 : total, p, s);
     }
 
-    /** 毛利报表（P1-26）：销售额（订单单价） - 成本（出库结转成本），按商品汇总。 */
+    /**
+     * 毛利报表（P1-26）：销售额（订单单价） - 成本（出库结转成本），按商品汇总。
+     * 执行态口径（批次十四）：新单据终态为 COMPLETED，历史单据为 ACTIVE（V26 已归一），二者并集才是已执行。
+     */
     public List<GrossProfitVO> grossProfit(Long productId, LocalDate startDate, LocalDate endDate) {
         LocalDate start = startDate == null ? LocalDate.of(1970, 1, 1) : startDate;
         LocalDate end = endDate == null ? LocalDate.now() : endDate;
@@ -259,7 +262,7 @@ public class ReportService {
                        COALESCE(SUM(di.quantity * oi.unit_price), 0) AS revenue,
                        COALESCE(SUM(di.quantity * di.unit_cost), 0) AS cost
                 FROM sales_delivery_item di
-                JOIN sales_delivery d ON d.id = di.delivery_id AND d.status = 'ACTIVE'
+                JOIN sales_delivery d ON d.id = di.delivery_id AND d.status IN ('COMPLETED', 'ACTIVE')
                 JOIN sales_order_item oi ON oi.order_id = d.order_id AND oi.product_id = di.product_id
                 JOIN product p ON p.id = di.product_id
                 WHERE d.delivery_date BETWEEN :start AND :end
@@ -363,13 +366,13 @@ public class ReportService {
         BigDecimal todayPurchase = jdbc.queryForObject("""
                 SELECT COALESCE(SUM(ri.quantity * ri.unit_cost), 0)
                 FROM purchase_receive_item ri
-                JOIN purchase_receive r ON r.id = ri.receive_id AND r.status = 'ACTIVE'
+                JOIN purchase_receive r ON r.id = ri.receive_id AND r.status IN ('COMPLETED', 'ACTIVE')
                 WHERE r.receive_date = :today
                 """, params, BigDecimal.class);
         BigDecimal todaySales = jdbc.queryForObject("""
                 SELECT COALESCE(SUM(di.quantity * oi.unit_price), 0)
                 FROM sales_delivery_item di
-                JOIN sales_delivery d ON d.id = di.delivery_id AND d.status = 'ACTIVE'
+                JOIN sales_delivery d ON d.id = di.delivery_id AND d.status IN ('COMPLETED', 'ACTIVE')
                 JOIN sales_order_item oi ON oi.order_id = d.order_id AND oi.product_id = di.product_id
                 WHERE d.delivery_date = :today
                 """, params, BigDecimal.class);
@@ -394,7 +397,7 @@ public class ReportService {
         jdbc.query("""
                 SELECT r.receive_date AS d, COALESCE(SUM(ri.quantity * ri.unit_cost), 0) AS amt
                 FROM purchase_receive_item ri
-                JOIN purchase_receive r ON r.id = ri.receive_id AND r.status = 'ACTIVE'
+                JOIN purchase_receive r ON r.id = ri.receive_id AND r.status IN ('COMPLETED', 'ACTIVE')
                 WHERE r.receive_date BETWEEN :from AND :to
                 GROUP BY r.receive_date
                 """, params, rs -> {
@@ -405,7 +408,7 @@ public class ReportService {
         jdbc.query("""
                 SELECT d.delivery_date AS d, COALESCE(SUM(di.quantity * oi.unit_price), 0) AS amt
                 FROM sales_delivery_item di
-                JOIN sales_delivery d ON d.id = di.delivery_id AND d.status = 'ACTIVE'
+                JOIN sales_delivery d ON d.id = di.delivery_id AND d.status IN ('COMPLETED', 'ACTIVE')
                 JOIN sales_order_item oi ON oi.order_id = d.order_id AND oi.product_id = di.product_id
                 WHERE d.delivery_date BETWEEN :from AND :to
                 GROUP BY d.delivery_date
