@@ -113,7 +113,7 @@
           <el-tag size="small" :type="docStatusTag(row.status)">{{ docStatusLabel(row.status) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="200" fixed="right">
+      <el-table-column label="操作" width="260" fixed="right">
         <template #default="{ row }">
           <el-button
             v-if="row.status === 'DRAFT'"
@@ -147,6 +147,17 @@
             @click="handleVoid(row as PurchaseReceive)"
           >
             作废
+          </el-button>
+          <el-button
+            v-if="row.status === 'PUSHED'"
+            v-permission="'purchase:receive:wms-callback'"
+            link
+            type="primary"
+            :loading="isActing(row.id!, 'wms')"
+            :disabled="isBlocked() && !isActing(row.id!, 'wms')"
+            @click="handleWmsCallback(row as PurchaseReceive)"
+          >
+            回传实量
           </el-button>
           <span v-if="isAwaitingWms(row.status)" class="text-muted">已下发WMS，待回传</span>
           <span v-else-if="!canVoid(row.status) && row.status !== 'DRAFT'" class="text-muted">-</span>
@@ -363,7 +374,7 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref, computed, onMounted } from 'vue'
+import { reactive, ref, computed, onMounted, onActivated } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { Search, Plus, Download } from '@element-plus/icons-vue'
 import {
@@ -372,6 +383,7 @@ import {
   createPurchaseReceive,
   submitPurchaseReceive,
   voidPurchaseReceive,
+  wmsCallbackPurchaseReceive,
   exportPurchaseReceives,
   batchSubmitPurchaseReceives,
   batchVoidPurchaseReceives,
@@ -885,7 +897,43 @@ async function handleVoid(row: PurchaseReceive) {
   )
 }
 
+// WMS 回传实量：确认后按当前单据量回传（不传明细，后端按单据量执行库存/财务），成功后刷新列表与下拉
+async function handleWmsCallback(row: PurchaseReceive) {
+  try {
+    await ElMessageBox.confirm(
+      `确认将入库单「${row.receiveNo || `#${row.id}`}」按当前单据量回传实量吗？回传后将按实量执行库存入库与应付生成，且不可重复回传。`,
+      'WMS 回传实量',
+      { type: 'warning', confirmButtonText: '确认回传', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  await run(
+    row.id!,
+    async () => {
+      await wmsCallbackPurchaseReceive(row.id!)
+      ElMessage.success('已按单据量回传实量')
+      detailVisible.value = false
+      await load()
+      loadOptions()
+    },
+    'wms'
+  )
+}
+
 onMounted(() => {
+  load()
+  loadOptions()
+})
+
+// keep-alive 多标签页：切回标签时刷新列表与下拉缓存，避免看到切走前的旧数据。
+// 首次 onActivated 紧随 onMounted（挂载即激活），用标记跳过，避免首屏重复请求。
+let activatedOnce = false
+onActivated(() => {
+  if (!activatedOnce) {
+    activatedOnce = true
+    return
+  }
   load()
   loadOptions()
 })

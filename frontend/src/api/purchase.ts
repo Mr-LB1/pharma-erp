@@ -147,6 +147,28 @@ export function voidPurchaseReceive(id: number, reason?: string): Promise<Purcha
   })
 }
 
+/** WMS 回传请求体（与后端 com.pharma.common.WmsCallbackRequest 对齐）：items 省略时后端按单据量回传。 */
+export interface WmsCallbackPayload {
+  /** WMS 单号（可空，回传时留痕） */
+  wmsNo?: string | null
+  /** WMS 回传时间（可空，默认取服务端当前时间） */
+  callbackTime?: string | null
+  /** 逐行实际数量；不传表示全部按单据量回传 */
+  items?: { itemId: number; actualQty: number }[]
+}
+
+// WMS 回传实量：仅 PUSHED 可回传，按实量执行入库/应付并置 COMPLETED（重复回传后端 400）
+export function wmsCallbackPurchaseReceive(
+  id: number,
+  payload?: WmsCallbackPayload
+): Promise<PurchaseReceive> {
+  return request<PurchaseReceive>({
+    url: `/api/purchase/receives/${id}/wms-callback`,
+    method: 'post',
+    data: payload ?? {}
+  })
+}
+
 // ===== 采购退货 =====
 export function listPurchaseReturns(
   keyword?: string,
@@ -213,5 +235,17 @@ export function voidPurchaseReturn(id: number, reason?: string): Promise<Purchas
     url: `/api/purchase/returns/${id}/void`,
     method: 'post',
     data: { reason: reason || null }
+  })
+}
+
+// WMS 回传实量：仅 PUSHED 可回传，按实量扣减库存并红冲应付（重复回传后端 400）
+export function wmsCallbackPurchaseReturn(
+  id: number,
+  payload?: WmsCallbackPayload
+): Promise<PurchaseReturn> {
+  return request<PurchaseReturn>({
+    url: `/api/purchase/returns/${id}/wms-callback`,
+    method: 'post',
+    data: payload ?? {}
   })
 }

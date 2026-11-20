@@ -148,6 +148,28 @@ export function voidSalesDelivery(id: number, reason?: string): Promise<SalesDel
   })
 }
 
+/** WMS 回传请求体（与后端 com.pharma.common.WmsCallbackRequest 对齐）：items 省略时后端按单据量回传。 */
+export interface WmsCallbackPayload {
+  /** WMS 单号（可空，回传时留痕） */
+  wmsNo?: string | null
+  /** WMS 回传时间（可空，默认取服务端当前时间） */
+  callbackTime?: string | null
+  /** 逐行实际数量；不传表示全部按单据量回传 */
+  items?: { itemId: number; actualQty: number }[]
+}
+
+// WMS 回传实量：仅 PUSHED 可回传，按实量执行库存/财务并置 COMPLETED（重复回传后端 400）
+export function wmsCallbackSalesDelivery(
+  id: number,
+  payload?: WmsCallbackPayload
+): Promise<SalesDelivery> {
+  return request<SalesDelivery>({
+    url: `/api/sales/deliveries/${id}/wms-callback`,
+    method: 'post',
+    data: payload ?? {}
+  })
+}
+
 // ===== 销售退货 =====
 export function listSalesReturns(
   keyword?: string,

@@ -110,7 +110,7 @@
           <el-tag size="small" :type="docStatusTag(row.status)">{{ docStatusLabel(row.status) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="200" fixed="right">
+      <el-table-column label="操作" width="260" fixed="right">
         <template #default="{ row }">
           <el-button
             v-if="row.status === 'DRAFT'"
@@ -144,6 +144,17 @@
             @click="handleVoid(row as SalesDelivery)"
           >
             作废
+          </el-button>
+          <el-button
+            v-if="row.status === 'PUSHED'"
+            v-permission="'sales:delivery:wms-callback'"
+            link
+            type="primary"
+            :loading="isActing(row.id!, 'wms')"
+            :disabled="isBlocked() && !isActing(row.id!, 'wms')"
+            @click="handleWmsCallback(row as SalesDelivery)"
+          >
+            回传实量
           </el-button>
           <span v-if="isAwaitingWms(row.status)" class="text-muted">已下发WMS，待回传</span>
           <span v-else-if="!canVoid(row.status) && row.status !== 'DRAFT'" class="text-muted">-</span>
@@ -363,7 +374,7 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref, computed, watch, onMounted } from 'vue'
+import { reactive, ref, computed, watch, onMounted, onActivated } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { Search, Plus, Download } from '@element-plus/icons-vue'
 import {
@@ -372,6 +383,7 @@ import {
   createSalesDelivery,
   submitSalesDelivery,
   voidSalesDelivery,
+  wmsCallbackSalesDelivery,
   exportSalesDeliveries,
   batchSubmitSalesDeliveries,
   batchVoidSalesDeliveries,
@@ -390,7 +402,7 @@ import {
   DOC_STATUS_OPTIONS
 } from '@/utils/status'
 import { wmsActualText, wmsDiffText } from '@/utils/wms'
-import { formatMoney, formatQty, disabledFutureDate } from '@/utils/format'
+import { formatMoney, formatQty, disabledFutureDate, todayText } from '@/utils/format'
 import { saveBlob, dateStamp } from '@/utils/download'
 import { mergeById } from '@/utils/options'
 import { useRowAction } from '@/composables/useRowAction'
@@ -523,7 +535,8 @@ const dialogVisible = ref(false)
 const saving = ref(false)
 const formRef = ref<FormInstance>()
 
-const today = () => new Date().toISOString().slice(0, 10)
+// 默认业务日期取本地日历日，避免 toISOString() 的 UTC 偏移在东八区凌晨串天
+const today = () => todayText()
 
 const emptyItem = (): ItemRow => ({
   productId: undefined,
@@ -841,7 +854,43 @@ async function handleSubmit(row: SalesDelivery) {
   )
 }
 
+// WMS 回传实量：确认后按当前单据量回传（不传明细，后端按单据量执行库存/财务），成功后刷新列表与下拉
+async function handleWmsCallback(row: SalesDelivery) {
+  try {
+    await ElMessageBox.confirm(
+      `确认将出库单「${row.deliveryNo || `#${row.id}`}」按当前单据量回传实量吗？回传后将按实量执行库存扣减与应收确认，且不可重复回传。`,
+      'WMS 回传实量',
+      { type: 'warning', confirmButtonText: '确认回传', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  await run(
+    row.id!,
+    async () => {
+      await wmsCallbackSalesDelivery(row.id!)
+      ElMessage.success('已按单据量回传实量')
+      detailVisible.value = false
+      await load()
+      loadOptions()
+    },
+    'wms'
+  )
+}
+
 onMounted(() => {
+  load()
+  loadOptions()
+})
+
+// keep-alive 多标签页：切回标签时刷新列表与下拉缓存，避免看到切走前的旧数据。
+// 首次 onActivated 紧随 onMounted（挂载即激活），用标记跳过，避免首屏重复请求。
+let activatedOnce = false
+onActivated(() => {
+  if (!activatedOnce) {
+    activatedOnce = true
+    return
+  }
   load()
   loadOptions()
 })
