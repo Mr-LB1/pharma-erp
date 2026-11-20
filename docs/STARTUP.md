@@ -190,7 +190,38 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\status-erp.ps1
 
 ---
 
-## 10. 一分钟自检清单
+## 10. 清理测试数据（回到干净演示态）
+
+冒烟测试会在库里留下大量测试账号、测试档案和业务单据。清理脚本：
+
+```powershell
+# 1) 先备份（必须）
+$env:PGPASSWORD='<数据库口令>'
+pg_dump -h localhost -U postgres -Fc -d pharma_erp -f backups\pharma_erp_before_cleanup.dump
+
+# 2) 执行清理
+& "C:\Program Files\PostgreSQL\17\bin\psql.exe" -h localhost -U postgres -d pharma_erp `
+  -v ON_ERROR_STOP=1 -f scripts\cleanup-test-data.sql
+
+# 3) 还原（万一清错）
+pg_restore -h localhost -U postgres -d pharma_erp --clean --if-exists backups\pharma_erp_before_cleanup.dump
+```
+
+清理内容（脚本 `scripts/cleanup-test-data.sql` 内有完整注释）：
+
+| 处理 | 对象 |
+|---|---|
+| 清空 | 全部业务单据与痕迹：采购/销售/收货/出库/退货/调拨/盘点、库存、库存流水、成本台账、批次追溯、审批记录、审计日志、应收应付、收付款、发票登记、不合格品 |
+| 清空 | 保留名单之外的测试账号、供应商、客户、商品、仓库 |
+| 保留 | 系统：`admin`/`approver` 账号、角色与权限、审批配置、Flyway 历史 |
+| 保留 | 演示档案：国药控股有限公司、北京同仁堂药店、商品 P001/P-T1795022722、常温库A |
+| 重置 | 单号序列 `number_sequence.seq = 0`，后续单据从 1 号重新编 |
+
+> 该脚本只用于开发/演示库；生产环境业务单据按 GSP 规则不允许物理删除，只能作废/冲红。
+
+---
+
+## 11. 一分钟自检清单
 
 - [ ] 5432 / 6379 已监听（数据库、缓存已启动）
 - [ ] `start-erp.ps1` 输出「后端已就绪」「前端已就绪」

@@ -30,6 +30,9 @@ backend/config/local-dev.yml
 *.pid
 logs/
 
+# 数据库备份（pg_dump 产物，含业务数据，不入库）
+backups/
+
 # 子对话临时交接文档（只保留目录占位）
 docs/handoffs/*.md
 !docs/handoffs/.gitkeep
