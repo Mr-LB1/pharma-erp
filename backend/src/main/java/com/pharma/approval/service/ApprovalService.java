@@ -168,9 +168,12 @@ public class ApprovalService {
         String currentUser = ledger.currentUser();
         String orderNo;
         String createdBy;
+        // P0-2：直接审批的订单/退货单先对单据头加行级悲观锁再复核状态，
+        // 避免两人并发审批同一张单时都通过 SUBMITTED 守卫而重复推进/覆盖状态。
+        // 执行型单据（入库/出库/采购退货/调拨）由各 Service 的 approveDocument 内部加锁。
         switch (bizType) {
             case BIZ_PURCHASE_ORDER -> {
-                PurchaseOrder o = purchaseOrderRepository.findById(bizId)
+                PurchaseOrder o = purchaseOrderRepository.findByIdForUpdate(bizId)
                         .orElseThrow(() -> BusinessException.notFound("采购订单不存在: " + bizId));
                 if (!"SUBMITTED".equals(o.getStatus())) {
                     throw BusinessException.badRequest("仅已提交状态可审批，当前状态: " + o.getStatus());
@@ -184,7 +187,7 @@ public class ApprovalService {
                 createdBy = o.getCreatedBy();
             }
             case BIZ_SALES_RETURN -> {
-                SalesReturn r = salesReturnRepository.findById(bizId)
+                SalesReturn r = salesReturnRepository.findByIdForUpdate(bizId)
                         .orElseThrow(() -> BusinessException.notFound("销售退货单不存在: " + bizId));
                 if (!"SUBMITTED".equals(r.getStatus())) {
                     throw BusinessException.badRequest("仅已提交状态可审批，当前状态: " + r.getStatus());
@@ -197,7 +200,7 @@ public class ApprovalService {
                 createdBy = r.getCreatedBy();
             }
             case BIZ_SALES_ORDER -> {
-                SalesOrder o = salesOrderRepository.findById(bizId)
+                SalesOrder o = salesOrderRepository.findByIdForUpdate(bizId)
                         .orElseThrow(() -> BusinessException.notFound("销售订单不存在: " + bizId));
                 if (!"SUBMITTED".equals(o.getStatus())) {
                     throw BusinessException.badRequest("仅已提交状态可审批，当前状态: " + o.getStatus());

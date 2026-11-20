@@ -1,13 +1,16 @@
 package com.pharma.purchase.repository;
 
 import com.pharma.purchase.entity.PurchaseOrder;
+import jakarta.persistence.LockModeType;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.util.List;
+import java.util.Optional;
 
 public interface PurchaseOrderRepository extends JpaRepository<PurchaseOrder, Long> {
 
@@ -29,4 +32,12 @@ public interface PurchaseOrderRepository extends JpaRepository<PurchaseOrder, Lo
     List<PurchaseOrder> findByStatusOrderByIdDesc(String status);
 
     boolean existsBySupplierId(Long supplierId);
+
+    /**
+     * P0-2 单据头行级悲观锁：直接审批采购订单前先锁订单头并复核状态，
+     * 避免并发重复审批把同一张订单重复推进下游。
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT o FROM PurchaseOrder o WHERE o.id = :id")
+    Optional<PurchaseOrder> findByIdForUpdate(@Param("id") Long id);
 }

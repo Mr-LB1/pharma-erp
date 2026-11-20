@@ -24,10 +24,12 @@ import com.pharma.sales.entity.SalesDelivery;
 import com.pharma.sales.entity.SalesDeliveryItem;
 import com.pharma.sales.entity.SalesOrder;
 import com.pharma.sales.entity.SalesOrderItem;
+import com.pharma.sales.entity.SalesReturn;
 import com.pharma.sales.repository.SalesDeliveryItemRepository;
 import com.pharma.sales.repository.SalesDeliveryRepository;
 import com.pharma.sales.repository.SalesOrderItemRepository;
 import com.pharma.sales.repository.SalesOrderRepository;
+import com.pharma.sales.repository.SalesReturnRepository;
 import com.pharma.system.service.AuditLogService;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -66,6 +68,7 @@ public class SalesDeliveryService {
     private final SalesDeliveryRepository deliveryRepository;
     private final SalesDeliveryItemRepository deliveryItemRepository;
     private final SalesOrderRepository orderRepository;
+    private final SalesReturnRepository salesReturnRepository;
     private final SalesOrderItemRepository orderItemRepository;
     private final InventoryLedgerService ledger;
     private final LotTraceRepository lotTraceRepository;
@@ -81,6 +84,7 @@ public class SalesDeliveryService {
     public SalesDeliveryService(SalesDeliveryRepository deliveryRepository,
                                 SalesDeliveryItemRepository deliveryItemRepository,
                                 SalesOrderRepository orderRepository,
+                                SalesReturnRepository salesReturnRepository,
                                 SalesOrderItemRepository orderItemRepository,
                                 InventoryLedgerService ledger,
                                 LotTraceRepository lotTraceRepository,
@@ -95,6 +99,7 @@ public class SalesDeliveryService {
         this.deliveryRepository = deliveryRepository;
         this.deliveryItemRepository = deliveryItemRepository;
         this.orderRepository = orderRepository;
+        this.salesReturnRepository = salesReturnRepository;
         this.orderItemRepository = orderItemRepository;
         this.ledger = ledger;
         this.lotTraceRepository = lotTraceRepository;
@@ -146,7 +151,8 @@ public class SalesDeliveryService {
     /** 编辑：仅草稿或已驳回可改，整单重建待出库明细；已驳回改完仍为 REJECTED，需重新提交。 */
     @Transactional
     public SalesDeliveryVO update(Long id, SalesDeliveryCreateRequest req) {
-        SalesDelivery delivery = deliveryRepository.findById(id)
+        // P0-2：编辑先锁单据头，避免与并发提交/作废交叉覆盖同一张单的状态与明细
+        SalesDelivery delivery = deliveryRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("销售出库单不存在: " + id));
         if (!"DRAFT".equals(delivery.getStatus()) && !"REJECTED".equals(delivery.getStatus())) {
             throw BusinessException.badRequest("仅草稿或已驳回出库单可编辑，当前状态: " + delivery.getStatus());
@@ -175,7 +181,8 @@ public class SalesDeliveryService {
     /** 提审：DRAFT / REJECTED -> SUBMITTED，写 PENDING approval_record（金额分级节点）。 */
     @Transactional
     public SalesDeliveryVO submit(Long id) {
-        SalesDelivery delivery = deliveryRepository.findById(id)
+        // P0-2：提交先锁单据头，避免并发重复提交生成多条 PENDING 待审记录
+        SalesDelivery delivery = deliveryRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("销售出库单不存在: " + id));
         if (!"DRAFT".equals(delivery.getStatus()) && !"REJECTED".equals(delivery.getStatus())) {
             throw BusinessException.badRequest("仅草稿或已驳回出库单可提交，当前状态: " + delivery.getStatus());
@@ -205,7 +212,8 @@ public class SalesDeliveryService {
     /** 审批驳回：SUBMITTED -> REJECTED（可编辑后重新提交）。 */
     @Transactional
     public void reject(Long id) {
-        SalesDelivery delivery = deliveryRepository.findById(id)
+        // P0-2：驳回与审批通过共用单据头锁，避免并发下状态机被交叉改写
+        SalesDelivery delivery = deliveryRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("销售出库单不存在: " + id));
         if (!"SUBMITTED".equals(delivery.getStatus())) {
             throw BusinessException.badRequest("仅已提交状态可驳回，当前状态: " + delivery.getStatus());
@@ -227,7 +235,8 @@ public class SalesDeliveryService {
      */
     @Transactional
     public void approveDocument(Long id) {
-        SalesDelivery delivery = deliveryRepository.findById(id)
+        // P0-2：审批通过先锁单据头，并发重复审批只允许一次推进到 PUSHED
+        SalesDelivery delivery = deliveryRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("销售出库单不存在: " + id));
         if (!"SUBMITTED".equals(delivery.getStatus())) {
             throw BusinessException.badRequest("仅已提交状态可审批，当前状态: " + delivery.getStatus());
@@ -251,7 +260,8 @@ public class SalesDeliveryService {
      */
     @Transactional
     public SalesDeliveryVO wmsCallback(Long id, com.pharma.common.WmsCallbackRequest req) {
-        SalesDelivery delivery = deliveryRepository.findById(id)
+        // P0-2：回传先锁单据头，并发重复回传只有一次能通过 PUSHED 状态守卫（避免重复扣减库存）
+        SalesDelivery delivery = deliveryRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("销售出库单不存在: " + id));
         if (!"PUSHED".equals(delivery.getStatus())) {
             throw BusinessException.badRequest("仅已下发 WMS 的单据可回传实量，当前状态: " + delivery.getStatus());
@@ -270,10 +280,12 @@ public class SalesDeliveryService {
      * 按 WMS 实发量执行出库：草稿占位行按实量 FEFO 重写为真实批次行。
      * 行级差异：每个品种首个批次行记录 qty_diff = 实发合计 - 单据量，其余批次行 qty_diff=0；
      * actual_qty 为该批次实际出库量（Σ actual_qty = 实发合计）。
+     * P1-F：执行前复核客户首营/证照、商品首营/状态（审批后可能已变更），校验在任何库存扣减之前。
      */
     @Transactional
     public SalesDeliveryVO executeActual(Long id, Map<Long, BigDecimal> actualQtyByItemId) {
-        SalesDelivery delivery = deliveryRepository.findById(id)
+        // P0-2：执行出库先锁单据头（wmsCallback 已锁，此处兼容直接调用），防止并发重复执行扣减库存
+        SalesDelivery delivery = deliveryRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("销售出库单不存在: " + id));
         if (!"PUSHED".equals(delivery.getStatus())) {
             throw BusinessException.badRequest("仅已下发 WMS 的单据可执行出库，当前状态: " + delivery.getStatus());
@@ -288,6 +300,9 @@ public class SalesDeliveryService {
         if (drafts.isEmpty()) {
             throw BusinessException.badRequest("出库明细不能为空");
         }
+        // P1-F：审批后到 WMS 执行前客户证照/首营、商品首营可能已变更，执行出库前再复核一次；
+        //       必须放在 FEFO 扣减库存与生成应收之前，避免证照过期仍出库
+        checkComplianceBeforeExecute(order, drafts);
 
         // 单据量 / 实发量按品种汇总（建单时已保证同品种不重复）
         Map<Long, BigDecimal> requestedByProduct = new java.util.LinkedHashMap<>();
@@ -402,6 +417,40 @@ public class SalesDeliveryService {
             actual.putIfAbsent(it.getId(), it.getQuantity());
         }
         return actual;
+    }
+
+    /**
+     * P1-F WMS 执行前合规复核：建单时已校验客户首营/证照与商品首营，但审批通过到实际出库之间
+     * 客户证照可能过期、商品可能停用或首营被撤销，执行出库（扣库存、生成应收）前再拦一次。
+     * 校验先于任何库存扣减与财务动作，失败返回 400 并在文案中指明客户/商品名称。
+     */
+    private void checkComplianceBeforeExecute(SalesOrder order, List<SalesDeliveryItem> drafts) {
+        Customer customer = customerRepository.findById(order.getCustomerId())
+                .orElseThrow(() -> BusinessException.badRequest(
+                        "客户不存在，不能执行出库: " + order.getCustomerId()));
+        if (!"APPROVED".equals(customer.getFirstAuditStatus())) {
+            throw BusinessException.badRequest("客户未过首营审核，不能执行出库: " + customer.getName());
+        }
+        if (customer.getLicenseExpire() != null && customer.getLicenseExpire().isBefore(LocalDate.now())) {
+            throw BusinessException.badRequest("客户证照已过期，不能执行出库: " + customer.getName()
+                    + "（有效期至 " + customer.getLicenseExpire() + "）");
+        }
+        // 同品种不重复（建单已保证），按明细顺序逐品种复核，保证报错顺序稳定
+        Set<Long> checkedProductIds = new HashSet<>();
+        for (SalesDeliveryItem di : drafts) {
+            if (!checkedProductIds.add(di.getProductId())) {
+                continue;
+            }
+            Product product = productRepository.findById(di.getProductId())
+                    .orElseThrow(() -> BusinessException.badRequest(
+                            "商品不存在，不能执行出库: " + di.getProductId()));
+            if (!"ACTIVE".equals(product.getStatus())) {
+                throw BusinessException.badRequest("商品已停用，不能执行出库: " + product.getGenericName());
+            }
+            if (!"APPROVED".equals(product.getFirstAuditStatus())) {
+                throw BusinessException.badRequest("商品未过首营审核，不能执行出库: " + product.getGenericName());
+            }
+        }
     }
 
     /**
@@ -526,11 +575,13 @@ public class SalesDeliveryService {
     /**
      * R8 作废红冲：COMPLETED（含历史 ACTIVE）→ 反向库存流水 + 反向成本台账 + lot_trace 作废记录 + 应收联动作废；
      * DRAFT / REJECTED → 仅置 VOID（未执行出库，无库存/财务影响）；SUBMITTED → 拒绝，需先驳回或完成审批。
+     * P1-B 反向拦截：存在未作废（status != VOID）的销售退货单时拒绝作废，避免重复回补库存与重复冲销应收。
      * reason 写入审计日志留痕。
      */
     @Transactional
     public SalesDeliveryVO voidDelivery(Long id, String reason) {
-        SalesDelivery delivery = deliveryRepository.findById(id)
+        // P0-2：作废先锁单据头，避免与并发回传/作废交叉覆盖状态并重复回补库存
+        SalesDelivery delivery = deliveryRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("销售出库单不存在: " + id));
         SalesOrder order = orderRepository.findById(delivery.getOrderId()).orElse(null);
         // IDOR 防护：出库单制单人或关联销售单制单人（特权身份豁免）
@@ -546,6 +597,8 @@ public class SalesDeliveryService {
             throw BusinessException.badRequest("已下发 WMS 的出库单不可直接作废，请等待回传完成后再处理: "
                     + delivery.getDeliveryNo());
         }
+        // P1-B：在置 VOID / 回冲库存前拦截未作废退货单（退货验收已回补库存并生成红字应收）
+        ensureNoOpenSalesReturn(delivery);
 
         String before = delivery.getStatus();
         String opUser = ledger.currentUser();
@@ -556,14 +609,27 @@ public class SalesDeliveryService {
         deliveryRepository.save(delivery);
         if (executed) {
             for (SalesDeliveryItem di : items) {
-                Long stockId = lotTraceRepository
+                // 出库追溯是执行凭据：缺失说明该明细未真实出库，不允许凭空回补库存
+                Long tracedStockId = lotTraceRepository
                         .findFirstByProductIdAndBatchNoAndTargetTypeAndTargetIdAndSourceType(
                                 di.getProductId(), di.getBatchNo(), TRACE_SALES_DELIVERY_ITEM, di.getId(), TRACE_STOCK)
                         .map(t -> t.getSourceId())
                         .orElseThrow(() -> BusinessException.badRequest(
                                 "未找到出库追溯，无法作废: item=" + di.getId()));
-                Stock stock = stockRepository.findById(stockId)
-                        .orElseThrow(() -> BusinessException.badRequest("库存批次不存在: " + stockId));
+                // P0-2：回补前按 (商品, 批号, 出库仓库) 对库存行加悲观锁，避免与并发出库/盘点覆盖数量。
+                // 历史单据（批次十四前）无单据级仓库，按出库追溯的库存行定位其仓库后再加锁
+                Long locationId = delivery.getWarehouseId();
+                if (locationId == null) {
+                    locationId = stockRepository.findById(tracedStockId)
+                            .map(Stock::getLocationId)
+                            .orElseThrow(() -> BusinessException.badRequest(
+                                    "库存批次不存在: " + tracedStockId));
+                }
+                Stock stock = stockRepository
+                        .findByProductIdAndBatchNoAndLocationIdForUpdate(
+                                di.getProductId(), di.getBatchNo(), locationId)
+                        .orElseThrow(() -> BusinessException.badRequest("未找到出库库存批次，无法作废: 商品 "
+                                + di.getProductId() + " 批号 " + di.getBatchNo()));
 
                 BigDecimal qty = di.getQuantity();
                 BigDecimal beforeQty = stock.getQuantity();
@@ -577,7 +643,7 @@ public class SalesDeliveryService {
                 ledger.applyCostIn(di.getProductId(), di.getBatchNo(), qty, di.getUnitCost(),
                         ledger.currentBalance(di.getProductId()));
 
-                ledger.writeLotTrace(di.getProductId(), di.getBatchNo(), TRACE_STOCK, stockId,
+                ledger.writeLotTrace(di.getProductId(), di.getBatchNo(), TRACE_STOCK, stock.getId(),
                         TRACE_SALES_DELIVERY_VOID, delivery.getId(), qty, opUser);
             }
 
@@ -604,6 +670,22 @@ public class SalesDeliveryService {
         return toVO(delivery, vos,
                 order == null ? null : order.getOrderNo(),
                 order == null ? null : customerName(order.getCustomerId()));
+    }
+
+    /**
+     * P1-B 反向拦截：出库单下存在未作废（status != VOID）的销售退货单时拒绝作废出库。
+     * 退货验收已按原出库批次回补库存并生成红字应收，再作废出库会重复回补库存、重复冲销应收。
+     * 调用方已持有出库单头行级锁，与退货验收 / 退货作废的单据头锁互斥。
+     */
+    private void ensureNoOpenSalesReturn(SalesDelivery delivery) {
+        List<String> openReturnNos = salesReturnRepository.findByDeliveryId(delivery.getId()).stream()
+                .filter(r -> !"VOID".equals(r.getStatus()))
+                .map(SalesReturn::getReturnNo)
+                .toList();
+        if (!openReturnNos.isEmpty()) {
+            throw BusinessException.badRequest("存在未作废的销售退货单，不能作废出库单: "
+                    + delivery.getDeliveryNo() + "（退货单 " + String.join("、", openReturnNos) + "）");
+        }
     }
 
     /** 建单/编辑共用校验：订单状态、业务日期、明细品种与信用额度二次校验。 */

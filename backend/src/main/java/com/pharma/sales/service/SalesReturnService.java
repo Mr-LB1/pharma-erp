@@ -123,9 +123,11 @@ public class SalesReturnService {
             throw BusinessException.badRequest("原销售出库单不能为空");
         }
         dateValidator.validateBizDate(req.returnDate(), "退货日期");
-        SalesDelivery delivery = deliveryRepository.findById(req.deliveryId())
+        // P3：建退货先锁源出库单头，避免与 voidDelivery 并发时建出落在已 VOID 出库单上的滞留退货单
+        SalesDelivery delivery = deliveryRepository.findByIdForUpdate(req.deliveryId())
                 .orElseThrow(() -> BusinessException.notFound("销售出库单不存在: " + req.deliveryId()));
         // 批次十四：出库改为审批后执行，已完成出库单状态为 COMPLETED（历史单据 ACTIVE）
+        // 锁内复核源单状态：作废/未完成的出库单不可退货（沿用既有文案）
         if (!"ACTIVE".equals(delivery.getStatus()) && !"COMPLETED".equals(delivery.getStatus())) {
             throw BusinessException.badRequest("已作废或未完成的出库单不可退货: " + delivery.getDeliveryNo());
         }
@@ -228,7 +230,8 @@ public class SalesReturnService {
 
     @Transactional
     public SalesReturnVO submit(Long id) {
-        SalesReturn header = returnRepository.findById(id)
+        // P0-2：提交先锁退货单头，避免并发重复提交生成多条 PENDING 待审记录
+        SalesReturn header = returnRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("销售退货单不存在: " + id));
         // 退货不校验源单据/制单人归属：由「退货专员」角色（权限码）负责全仓退货单
         if (!"DRAFT".equals(header.getStatus()) && !"REJECTED".equals(header.getStatus())) {
@@ -261,11 +264,21 @@ public class SalesReturnService {
      */
     @Transactional
     public SalesReturnVO receive(Long id, SalesReturnReceiveRequest req) {
-        SalesReturn header = returnRepository.findById(id)
+        // P0-2：验收先锁退货单头，并发重复验收只有一次能通过 APPROVED 状态守卫（避免重复回补库存）
+        SalesReturn header = returnRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("销售退货单不存在: " + id));
         // 验收同样不校验制单人：退货专员可验收他人提交的退货单
         if (!"APPROVED".equals(header.getStatus())) {
             throw BusinessException.badRequest("仅审批通过的退货单可验收，当前状态: " + header.getStatus());
+        }
+        // P0-2 源单复核：验收要按源出库单的批次回补库存，源单已作废/未执行则退货失去依据，直接 400。
+        // 锁源单头，保证「复核 → 回补库存」期间源单不会被并发作废（与 voidDelivery 的单据头锁互斥）。
+        SalesDelivery sourceDelivery = deliveryRepository.findByIdForUpdate(header.getDeliveryId())
+                .orElseThrow(() -> BusinessException.notFound(
+                        "销售出库单不存在: " + header.getDeliveryId()));
+        if (!"ACTIVE".equals(sourceDelivery.getStatus()) && !"COMPLETED".equals(sourceDelivery.getStatus())) {
+            throw BusinessException.badRequest("已作废或未完成的出库单不可退货: "
+                    + sourceDelivery.getDeliveryNo());
         }
         List<SalesReturnItem> items = returnItemRepository.findByReturnId(id);
         if (items.isEmpty()) {
@@ -343,7 +356,8 @@ public class SalesReturnService {
      */
     @Transactional
     public SalesReturnVO voidReturn(Long id, String reason) {
-        SalesReturn header = returnRepository.findById(id)
+        // P0-2：作废先锁退货单头，避免与并发验收/作废交叉覆盖状态并重复回冲出库库存
+        SalesReturn header = returnRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("销售退货单不存在: " + id));
         if ("VOID".equals(header.getStatus())) {
             throw BusinessException.badRequest("销售退货单已作废: " + header.getReturnNo());
