@@ -182,7 +182,8 @@ public class PurchaseReceiveService {
     /** 提审：DRAFT / REJECTED -> SUBMITTED，写 PENDING approval_record（金额分级节点）。 */
     @Transactional
     public PurchaseReceiveVO submit(Long id) {
-        PurchaseReceive receive = receiveRepository.findById(id)
+        // 单据头悲观锁：防止并发重复提交产生多条审批记录
+        PurchaseReceive receive = receiveRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("采购入库单不存在: " + id));
         if (!"DRAFT".equals(receive.getStatus()) && !"REJECTED".equals(receive.getStatus())) {
             throw BusinessException.badRequest("仅草稿或已驳回入库单可提交，当前状态: " + receive.getStatus());
@@ -212,7 +213,8 @@ public class PurchaseReceiveService {
     /** 审批驳回：SUBMITTED -> REJECTED（可编辑后重新提交）。 */
     @Transactional
     public void reject(Long id) {
-        PurchaseReceive receive = receiveRepository.findById(id)
+        // 单据头悲观锁：防止并发驳回/审批交错导致状态回退
+        PurchaseReceive receive = receiveRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("采购入库单不存在: " + id));
         if (!"SUBMITTED".equals(receive.getStatus())) {
             throw BusinessException.badRequest("仅已提交状态可驳回，当前状态: " + receive.getStatus());
@@ -235,7 +237,8 @@ public class PurchaseReceiveService {
      */
     @Transactional
     public void approveDocument(Long id) {
-        PurchaseReceive receive = receiveRepository.findById(id)
+        // 单据头悲观锁：防止并发重复审批导致重复下发 WMS
+        PurchaseReceive receive = receiveRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("采购入库单不存在: " + id));
         if (!"SUBMITTED".equals(receive.getStatus())) {
             throw BusinessException.badRequest("仅已提交状态可审批，当前状态: " + receive.getStatus());
@@ -260,7 +263,8 @@ public class PurchaseReceiveService {
      */
     @Transactional
     public PurchaseReceiveVO wmsCallback(Long id, com.pharma.common.WmsCallbackRequest req) {
-        PurchaseReceive receive = receiveRepository.findById(id)
+        // 单据头悲观锁：防止 WMS 并发重复回传导致重复入库
+        PurchaseReceive receive = receiveRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("采购入库单不存在: " + id));
         if (!"PUSHED".equals(receive.getStatus())) {
             throw BusinessException.badRequest("仅已下发 WMS 的单据可回传实量，当前状态: " + receive.getStatus());
@@ -281,7 +285,8 @@ public class PurchaseReceiveService {
      */
     @Transactional
     public PurchaseReceiveVO executeActual(Long id, Map<Long, BigDecimal> actualQtyByItemId) {
-        PurchaseReceive receive = receiveRepository.findById(id)
+        // 单据头悲观锁：防止并发执行；wmsCallback 已锁同一行时本事务内重复锁读无副作用
+        PurchaseReceive receive = receiveRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("采购入库单不存在: " + id));
         if (!"PUSHED".equals(receive.getStatus())) {
             throw BusinessException.badRequest("仅已下发 WMS 的单据可执行入库，当前状态: " + receive.getStatus());
@@ -296,6 +301,8 @@ public class PurchaseReceiveService {
         if (locationId == null) {
             throw BusinessException.badRequest("入库仓库缺失，无法执行入库: " + receive.getReceiveNo());
         }
+        // P1-D 执行前合规复核：必须在任何库存/成本/应付写入之前按当前供应商/商品主数据复核
+        validateExecutionCompliance(order, items);
 
         String opUser = ledger.currentUser();
         Map<Long, InventoryLedgerService.Balance> balances = new HashMap<>();
@@ -351,6 +358,59 @@ public class PurchaseReceiveService {
         Map<Long, String> names = productNames(items.stream().map(PurchaseReceiveItem::getProductId).toList());
         return toVO(receive, items.stream().map(i -> toItemVO(i, names)).toList(),
                 order.getOrderNo(), supplierName(order.getSupplierId()));
+    }
+
+    /**
+     * WMS 执行前合规复核（P1-D）：建单/审批时已校验供应商与商品资质，但到 WMS 回传执行之间
+     * 证照可能过期、首营/商品状态可能变化，执行入库前必须按当前主数据重新复核，
+     * 失败抛 400 且校验先于库存/成本/应付写入（事务回滚，不落库存）。
+     *
+     * @param order 关联采购订单（供应商来源）
+     * @param items 待执行入库明细（逐行复核商品）
+     */
+    private void validateExecutionCompliance(PurchaseOrder order, List<PurchaseReceiveItem> items) {
+        Supplier supplier = supplierRepository.findById(order.getSupplierId())
+                .orElseThrow(() -> BusinessException.badRequest("供应商不存在: " + order.getSupplierId()));
+        // R3 首营阻断：供应商当前仍须为已审核通过
+        if (!"APPROVED".equals(supplier.getFirstAuditStatus())) {
+            throw BusinessException.badRequest("供应商未过首营审核，不可执行采购入库: " + supplier.getName());
+        }
+        // R4 证照效期锁交易：证照早于今天视为已过期
+        if (supplier.getLicenseExpire() != null && supplier.getLicenseExpire().isBefore(LocalDate.now())) {
+            throw BusinessException.badRequest("供应商证照已过期，不可执行采购入库: " + supplier.getName());
+        }
+        Map<Long, Product> productCache = new HashMap<>();
+        for (PurchaseReceiveItem item : items) {
+            validateProductForExecution(item.getProductId(), productCache);
+        }
+    }
+
+    /**
+     * 执行前逐明细复核商品：必须存在、启用（status=ACTIVE）；已维护首营状态时也必须为 APPROVED。
+     *
+     * @param productId 商品主键
+     * @param cache     本次执行内的商品缓存（同一商品多批次只查一次库）
+     */
+    private void validateProductForExecution(Long productId, Map<Long, Product> cache) {
+        Product product = cache.computeIfAbsent(productId, pid -> productRepository.findById(pid).orElse(null));
+        if (product == null) {
+            throw BusinessException.badRequest("商品不存在: " + productId);
+        }
+        if (!"ACTIVE".equals(product.getStatus())) {
+            throw BusinessException.badRequest("商品非启用状态，不可执行采购入库: " + productLabel(product));
+        }
+        // 历史数据可能未维护首营状态（null）：有值时按 APPROVED 复核
+        if (product.getFirstAuditStatus() != null && !"APPROVED".equals(product.getFirstAuditStatus())) {
+            throw BusinessException.badRequest("商品未过首营审核，不可执行采购入库: " + productLabel(product));
+        }
+    }
+
+    /** 商品展示名：优先通用名，缺失时回退编码/主键，保证错误文案含可识别商品信息。 */
+    private static String productLabel(Product product) {
+        if (product.getGenericName() != null && !product.getGenericName().isBlank()) {
+            return product.getGenericName();
+        }
+        return product.getCode() == null ? String.valueOf(product.getId()) : product.getCode();
     }
 
     /** 回传实量解析：未提供明细则全部按单据量；提供则逐行校验归属与非负。 */
@@ -472,9 +532,9 @@ public class PurchaseReceiveService {
         return new ExportPayload<>(rows, result.getTotalElements(), ExportWriter.MAX_ROWS);
     }
 
-    /** 入库成本合计：Σ 数量 × 入库单价。 */
+    /** 入库成本合计：Σ 执行实量 × 入库单价（实量口径，未回传时回退单据量）。 */
     private static BigDecimal receiveAmount(List<PurchaseReceiveItem> items) {
-        return items.stream().map(i -> i.getQuantity().multiply(i.getUnitCost()))
+        return items.stream().map(i -> executedQty(i).multiply(i.getUnitCost()))
                 .reduce(BigDecimal.ZERO, BigDecimal::add).setScale(2, RoundingMode.HALF_UP);
     }
 
@@ -489,7 +549,8 @@ public class PurchaseReceiveService {
      */
     @Transactional
     public PurchaseReceiveVO voidReceive(Long id, String reason) {
-        PurchaseReceive receive = receiveRepository.findById(id)
+        // 单据头悲观锁：防止作废与执行/回传并发交错
+        PurchaseReceive receive = receiveRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("采购入库单不存在: " + id));
         PurchaseOrder order = orderRepository.findById(receive.getOrderId()).orElse(null);
         // IDOR 防护：入库单制单人或关联采购单制单人（特权身份豁免）
@@ -515,16 +576,19 @@ public class PurchaseReceiveService {
         receiveRepository.save(receive);
         if (executed) {
             for (PurchaseReceiveItem ri : items) {
+                // 实量口径：只冲回实际到货数量；实量为 0 的行执行时未落库存/追溯，无需冲回
+                BigDecimal qty = executedQty(ri);
+                if (qty.compareTo(BigDecimal.ZERO) <= 0) {
+                    continue;
+                }
                 Long stockId = lotTraceRepository
                         .findFirstByProductIdAndBatchNoAndSourceTypeAndSourceIdAndTargetType(
                                 ri.getProductId(), ri.getBatchNo(), TRACE_PURCHASE_RECEIVE_ITEM, ri.getId(), TRACE_STOCK)
                         .map(t -> t.getTargetId())
                         .orElseThrow(() -> BusinessException.badRequest(
                                 "未找到入库追溯，无法作废: item=" + ri.getId()));
-                Stock stock = stockRepository.findById(stockId)
-                        .orElseThrow(() -> BusinessException.badRequest("库存批次不存在: " + stockId));
-
-                BigDecimal qty = ri.getQuantity();
+                // 库存行悲观锁：作废冲回前按 (商品, 批号, 仓库) 锁读，防止与并发出入库交错导致超扣
+                Stock stock = lockStockById(stockId);
                 BigDecimal beforeQty = stock.getQuantity();
                 if (beforeQty.compareTo(qty) < 0) {
                     throw BusinessException.badRequest(
@@ -691,8 +755,36 @@ public class PurchaseReceiveService {
     }
 
     /**
+     * 执行实量口径（统一入口）：优先采用 WMS 回传实量 actualQty；未回传（null）时回退单据量 quantity。
+     * 作废库存/成本冲回、订单进度重算、导出金额、审计汇总必须统一走此口径，
+     * 避免「部分实量执行后仍按单据量冲回/统计」导致库存与订单进度失真。
+     *
+     * @param item 入库明细
+     * @return 该行实际执行数量（永不为 null）
+     */
+    static BigDecimal executedQty(PurchaseReceiveItem item) {
+        return item.getActualQty() == null ? item.getQuantity() : item.getActualQty();
+    }
+
+    /**
+     * 库存行悲观锁读：追溯记录只保存库存主键，先按主键定位批次，再用唯一键
+     * (productId, batchNo, locationId) 锁读，作为作废冲回的唯一可写快照。
+     *
+     * @param stockId 库存批次主键
+     * @return 已加悲观写锁的库存行
+     */
+    private Stock lockStockById(Long stockId) {
+        Stock located = stockRepository.findById(stockId)
+                .orElseThrow(() -> BusinessException.badRequest("库存批次不存在: " + stockId));
+        return stockRepository.findByProductIdAndBatchNoAndLocationIdForUpdate(
+                        located.getProductId(), located.getBatchNo(), located.getLocationId())
+                .orElseThrow(() -> BusinessException.badRequest("库存批次不存在: " + stockId));
+    }
+
+    /**
      * 按有效入库单（已执行 COMPLETED / 历史 ACTIVE，排除已作废与未审批）重算订单状态：
      * 无有效入库 -> APPROVED，收满 -> COMPLETED，否则 PARTIAL_RECEIVED。
+     * 收货量按实量口径 {@link #executedQty(PurchaseReceiveItem)} 累计（部分实量不得算作收满）。
      */
     private void advanceOrderStatus(PurchaseOrder order) {
         Map<Long, BigDecimal> orderedQty = orderItemRepository.findByOrderId(order.getId()).stream()
@@ -704,7 +796,8 @@ public class PurchaseReceiveService {
                 .map(PurchaseReceive::getId).toList();
         Map<Long, BigDecimal> receivedQty = new HashMap<>();
         for (PurchaseReceiveItem ri : receiveItemRepository.findByReceiveIdIn(receiveIds)) {
-            receivedQty.merge(ri.getProductId(), ri.getQuantity(), BigDecimal::add);
+            // 实量口径：部分到货只累计 actualQty，不能按单据量把订单算成收满
+            receivedQty.merge(ri.getProductId(), executedQty(ri), BigDecimal::add);
         }
 
         BigDecimal totalReceived = receivedQty.values().stream()
@@ -765,9 +858,9 @@ public class PurchaseReceiveService {
                 .collect(Collectors.toMap(Product::getId, p -> p.getGenericName() == null ? "" : p.getGenericName()));
     }
 
-    /** 审计快照用：明细数量合计。 */
+    /** 审计快照用：明细执行实量合计（实量口径，未回传时回退单据量）。 */
     private static BigDecimal totalQuantity(List<PurchaseReceiveItem> items) {
-        return items.stream().map(PurchaseReceiveItem::getQuantity)
+        return items.stream().map(PurchaseReceiveService::executedQty)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
     }
 }

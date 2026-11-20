@@ -153,7 +153,8 @@ public class StockTransferService {
     /** 提审：DRAFT / REJECTED -> SUBMITTED，写 PENDING approval_record（金额分级节点）。 */
     @Transactional
     public StockTransferVO submit(Long id) {
-        StockTransfer header = transferRepository.findById(id)
+        // 单据头悲观锁：防止并发重复提交产生多条审批记录
+        StockTransfer header = transferRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("调拨单不存在: " + id));
         if (!"DRAFT".equals(header.getStatus()) && !"REJECTED".equals(header.getStatus())) {
             throw BusinessException.badRequest("仅草稿或已驳回调拨单可提交，当前状态: " + header.getStatus());
@@ -183,7 +184,8 @@ public class StockTransferService {
     /** 审批驳回：SUBMITTED -> REJECTED（可编辑后重新提交）。 */
     @Transactional
     public void reject(Long id) {
-        StockTransfer header = transferRepository.findById(id)
+        // 单据头悲观锁：防止并发驳回/审批交错导致状态回退
+        StockTransfer header = transferRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("调拨单不存在: " + id));
         if (!"SUBMITTED".equals(header.getStatus())) {
             throw BusinessException.badRequest("仅已提交状态可驳回，当前状态: " + header.getStatus());
@@ -205,7 +207,8 @@ public class StockTransferService {
      */
     @Transactional
     public void approveDocument(Long id) {
-        StockTransfer header = transferRepository.findById(id)
+        // 单据头悲观锁：防止并发重复审批导致重复下发 WMS
+        StockTransfer header = transferRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("调拨单不存在: " + id));
         if (!"SUBMITTED".equals(header.getStatus())) {
             throw BusinessException.badRequest("仅已提交状态可审批，当前状态: " + header.getStatus());
@@ -225,7 +228,8 @@ public class StockTransferService {
      */
     @Transactional
     public StockTransferVO wmsCallback(Long id, com.pharma.common.WmsCallbackRequest req) {
-        StockTransfer header = transferRepository.findById(id)
+        // 单据头悲观锁：防止 WMS 并发重复回传导致重复移库
+        StockTransfer header = transferRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("调拨单不存在: " + id));
         if (!"PUSHED".equals(header.getStatus())) {
             throw BusinessException.badRequest("仅已下发 WMS 的单据可回传实量，当前状态: " + header.getStatus());
@@ -246,7 +250,8 @@ public class StockTransferService {
      */
     @Transactional
     public StockTransferVO executeActual(Long id, Map<Long, BigDecimal> actualQtyByItemId) {
-        StockTransfer header = transferRepository.findById(id)
+        // 单据头悲观锁：防止并发执行；wmsCallback 已锁同一行时本事务内重复锁读无副作用
+        StockTransfer header = transferRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("调拨单不存在: " + id));
         if (!"PUSHED".equals(header.getStatus())) {
             throw BusinessException.badRequest("仅已下发 WMS 的单据可执行调拨，当前状态: " + header.getStatus());
@@ -308,6 +313,23 @@ public class StockTransferService {
                 productNames(items.stream().map(StockTransferItem::getProductId).toList()));
     }
 
+    /**
+     * 执行实量口径（统一入口）：优先采用 WMS 回传实量 actualQty；未回传（null）时回退单据量 quantity。
+     * 作废库存/成本冲回与作废审计汇总必须走此口径，避免「部分实调后仍按单据量冲回」造成库存虚增。
+     *
+     * @param item 调拨明细
+     * @return 该行实际执行数量（永不为 null）
+     */
+    static BigDecimal executedQty(StockTransferItem item) {
+        return item.getActualQty() == null ? item.getQuantity() : item.getActualQty();
+    }
+
+    /** 作废审计快照用：明细执行实量合计（实量口径，未回传时回退单据量）。 */
+    private static BigDecimal executedTotalQuantity(List<StockTransferItem> items) {
+        return items.stream().map(StockTransferService::executedQty)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+    }
+
     /** 回传实量解析：未提供明细则全部按单据量；提供则校验归属与非负。 */
     private Map<Long, BigDecimal> resolveActualQty(List<StockTransferItem> items,
                                                    com.pharma.common.WmsCallbackRequest req) {
@@ -348,7 +370,8 @@ public class StockTransferService {
      */
     @Transactional
     public StockTransferVO voidTransfer(Long id, String reason) {
-        StockTransfer header = transferRepository.findById(id)
+        // 单据头悲观锁：防止作废与执行/回传并发交错
+        StockTransfer header = transferRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("调拨单不存在: " + id));
         DataScope.requireOwnership(header.getCreatedBy());
         if ("VOID".equals(header.getStatus())) {
@@ -368,10 +391,16 @@ public class StockTransferService {
         boolean executed = "COMPLETED".equals(before) || "ACTIVE".equals(before);
         if (executed) {
             for (StockTransferItem item : items) {
+                // 实量口径：只冲回实际调拨数量；实量为 0 的行执行时未移库，无需冲回
+                BigDecimal qty = executedQty(item);
+                if (qty.compareTo(BigDecimal.ZERO) <= 0) {
+                    continue;
+                }
                 String batchNo = item.getBatchNo();
-                BigDecimal qty = item.getQuantity();
+                // 库存行悲观锁：调入仓扣回前按 (商品, 批号, 仓库) 锁读，防止与并发出入库交错
                 Stock toStock = stockRepository
-                        .findByProductIdAndBatchNoAndLocationId(item.getProductId(), batchNo, header.getToWarehouseId())
+                        .findByProductIdAndBatchNoAndLocationIdForUpdate(
+                                item.getProductId(), batchNo, header.getToWarehouseId())
                         .orElseThrow(() -> BusinessException.badRequest("调入仓批次不存在，无法作废: 批号 " + batchNo));
 
                 // 调入仓扣回（OUT 流水 + 成本台出）
@@ -402,13 +431,9 @@ public class StockTransferService {
                 "作废仓库调拨单 " + header.getTransferNo() + (reason == null || reason.isBlank()
                         ? "" : "，原因：" + reason.trim()),
                 AuditLogService.json("transferNo", header.getTransferNo(), "status", before,
-                        "itemCount", items.size(),
-                        "totalQuantity", items.stream().map(StockTransferItem::getQuantity)
-                                .reduce(BigDecimal.ZERO, BigDecimal::add)),
+                        "itemCount", items.size(), "totalQuantity", executedTotalQuantity(items)),
                 AuditLogService.json("transferNo", header.getTransferNo(), "status", "VOID",
-                        "itemCount", items.size(),
-                        "totalQuantity", items.stream().map(StockTransferItem::getQuantity)
-                                .reduce(BigDecimal.ZERO, BigDecimal::add), "reason", reason));
+                        "itemCount", items.size(), "totalQuantity", executedTotalQuantity(items), "reason", reason));
 
         return toVO(header, items, warehouseName(header.getFromWarehouseId()),
                 warehouseName(header.getToWarehouseId()),

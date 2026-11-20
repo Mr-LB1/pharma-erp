@@ -41,6 +41,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -171,7 +172,8 @@ public class PurchaseReturnService {
     /** 提审：DRAFT / REJECTED -> SUBMITTED，写 PENDING approval_record（金额分级节点）。 */
     @Transactional
     public PurchaseReturnVO submit(Long id) {
-        PurchaseReturn header = returnRepository.findById(id)
+        // 单据头悲观锁：防止并发重复提交产生多条审批记录
+        PurchaseReturn header = returnRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("采购退货单不存在: " + id));
         if (!"DRAFT".equals(header.getStatus()) && !"REJECTED".equals(header.getStatus())) {
             throw BusinessException.badRequest("仅草稿或已驳回退货单可提交，当前状态: " + header.getStatus());
@@ -201,7 +203,8 @@ public class PurchaseReturnService {
     /** 审批驳回：SUBMITTED -> REJECTED（可编辑后重新提交）。 */
     @Transactional
     public void reject(Long id) {
-        PurchaseReturn header = returnRepository.findById(id)
+        // 单据头悲观锁：防止并发驳回/审批交错导致状态回退
+        PurchaseReturn header = returnRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("采购退货单不存在: " + id));
         if (!"SUBMITTED".equals(header.getStatus())) {
             throw BusinessException.badRequest("仅已提交状态可驳回，当前状态: " + header.getStatus());
@@ -223,7 +226,8 @@ public class PurchaseReturnService {
      */
     @Transactional
     public void approveDocument(Long id) {
-        PurchaseReturn header = returnRepository.findById(id)
+        // 单据头悲观锁：防止并发重复审批导致重复下发 WMS
+        PurchaseReturn header = returnRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("采购退货单不存在: " + id));
         if (!"SUBMITTED".equals(header.getStatus())) {
             throw BusinessException.badRequest("仅已提交状态可审批，当前状态: " + header.getStatus());
@@ -247,7 +251,8 @@ public class PurchaseReturnService {
      */
     @Transactional
     public PurchaseReturnVO wmsCallback(Long id, com.pharma.common.WmsCallbackRequest req) {
-        PurchaseReturn header = returnRepository.findById(id)
+        // 单据头悲观锁：防止 WMS 并发重复回传导致重复扣减库存
+        PurchaseReturn header = returnRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("采购退货单不存在: " + id));
         if (!"PUSHED".equals(header.getStatus())) {
             throw BusinessException.badRequest("仅已下发 WMS 的单据可回传实量，当前状态: " + header.getStatus());
@@ -268,7 +273,8 @@ public class PurchaseReturnService {
      */
     @Transactional
     public PurchaseReturnVO executeActual(Long id, Map<Long, BigDecimal> actualQtyByItemId) {
-        PurchaseReturn header = returnRepository.findById(id)
+        // 单据头悲观锁：防止并发执行；wmsCallback 已锁同一行时本事务内重复锁读无副作用
+        PurchaseReturn header = returnRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("采购退货单不存在: " + id));
         if (!"PUSHED".equals(header.getStatus())) {
             throw BusinessException.badRequest("仅已下发 WMS 的单据可执行退货，当前状态: " + header.getStatus());
@@ -277,6 +283,8 @@ public class PurchaseReturnService {
         if (items.isEmpty()) {
             throw BusinessException.badRequest("退货明细不能为空");
         }
+        // P1-D 执行前合规复核：必须在任何库存/成本/应付写入之前按当前供应商/商品主数据复核
+        validateExecutionCompliance(header, items);
 
         String opUser = ledger.currentUser();
         BigDecimal total = BigDecimal.ZERO;
@@ -324,6 +332,57 @@ public class PurchaseReturnService {
         return toVO(header, items, receiveNo, supplierName(header.getSupplierId()));
     }
 
+    /**
+     * 执行实量口径（统一入口）：优先采用 WMS 回传实量 actualQty；未回传（null）时回退单据量 quantity。
+     * 作废库存/成本回补必须走此口径，避免「部分实退后仍按单据量回补」造成库存虚增。
+     *
+     * @param item 退货明细
+     * @return 该行实际执行数量（永不为 null）
+     */
+    static BigDecimal executedQty(PurchaseReturnItem item) {
+        return item.getActualQty() == null ? item.getQuantity() : item.getActualQty();
+    }
+
+    /**
+     * WMS 执行前合规复核（P1-D）：建单/审批时已校验供应商资质，但到 WMS 回传执行之间
+     * 证照可能过期、供应商首营/商品状态可能变化，执行退货前必须按当前主数据重新复核，
+     * 失败抛 400 且校验先于库存/成本/应付写入（事务回滚，不扣库存）。
+     *
+     * @param header 采购退货单（供应商来源）
+     * @param items  待执行退货明细（逐行复核商品）
+     */
+    private void validateExecutionCompliance(PurchaseReturn header, List<PurchaseReturnItem> items) {
+        Supplier supplier = supplierRepository.findById(header.getSupplierId())
+                .orElseThrow(() -> BusinessException.badRequest("供应商不存在: " + header.getSupplierId()));
+        // R3 首营阻断：供应商当前仍须为已审核通过
+        if (!"APPROVED".equals(supplier.getFirstAuditStatus())) {
+            throw BusinessException.badRequest("供应商未过首营审核，不可执行采购退货: " + supplier.getName());
+        }
+        // R4 证照效期锁交易：证照早于今天视为已过期
+        if (supplier.getLicenseExpire() != null && supplier.getLicenseExpire().isBefore(LocalDate.now())) {
+            throw BusinessException.badRequest("供应商证照已过期，不可执行采购退货: " + supplier.getName());
+        }
+        Map<Long, Product> productCache = new HashMap<>();
+        for (PurchaseReturnItem item : items) {
+            Product product = productCache.computeIfAbsent(item.getProductId(),
+                    pid -> productRepository.findById(pid).orElse(null));
+            if (product == null) {
+                throw BusinessException.badRequest("商品不存在: " + item.getProductId());
+            }
+            if (!"ACTIVE".equals(product.getStatus())) {
+                throw BusinessException.badRequest("商品非启用状态，不可执行采购退货: " + productLabel(product));
+            }
+        }
+    }
+
+    /** 商品展示名：优先通用名，缺失时回退编码/主键，保证错误文案含可识别商品信息。 */
+    private static String productLabel(Product product) {
+        if (product.getGenericName() != null && !product.getGenericName().isBlank()) {
+            return product.getGenericName();
+        }
+        return product.getCode() == null ? String.valueOf(product.getId()) : product.getCode();
+    }
+
     /** 回传实量解析：未提供明细则全部按单据量；提供则校验归属与非负。 */
     private Map<Long, BigDecimal> resolveActualQty(List<PurchaseReturnItem> items,
                                                    com.pharma.common.WmsCallbackRequest req) {
@@ -364,7 +423,8 @@ public class PurchaseReturnService {
      */
     @Transactional
     public PurchaseReturnVO voidReturn(Long id, String reason) {
-        PurchaseReturn header = returnRepository.findById(id)
+        // 单据头悲观锁：防止作废与执行/回传并发交错
+        PurchaseReturn header = returnRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> BusinessException.notFound("采购退货单不存在: " + id));
         if ("VOID".equals(header.getStatus())) {
             throw BusinessException.badRequest("采购退货单已作废: " + header.getReturnNo());
@@ -384,10 +444,16 @@ public class PurchaseReturnService {
         boolean executed = "COMPLETED".equals(before) || "ACTIVE".equals(before);
         if (executed) {
             for (PurchaseReturnItem item : items) {
+                // 实量口径：只回补实际退货数量；实量为 0 的行执行时未扣库存，无需回补
+                BigDecimal qty = executedQty(item);
+                if (qty.compareTo(BigDecimal.ZERO) <= 0) {
+                    continue;
+                }
                 String batchNo = item.getBatchNo();
-                BigDecimal qty = item.getQuantity();
+                // 库存行悲观锁：回补前按 (商品, 批号, 仓库) 锁读，防止与并发出入库交错导致余额失真
                 Stock stock = stockRepository
-                        .findByProductIdAndBatchNoAndLocationId(item.getProductId(), batchNo, item.getWarehouseId())
+                        .findByProductIdAndBatchNoAndLocationIdForUpdate(
+                                item.getProductId(), batchNo, item.getWarehouseId())
                         .orElseThrow(() -> BusinessException.badRequest(
                                 "原批次库存不存在，无法回冲: 批号 " + batchNo));
                 Stock updated = ledger.upsertStock(item.getProductId(), batchNo, stock.getProduceDate(),
